@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+*.egg
+venv/
+.venv/
+
+# IDE / AI assistant config
+.vscode/
+.idea/
+.agent/
+.gemini/
+
+# Hugging Face model cache (15GB+ — downloads per machine via Docker volume)
+.cache/
+
+# Training data (persisted via Docker volume, will use cloud storage in production)
+backend/training_data/
+backend/adapters/
+
+# HITL local store
+hitl_store.json
+
+# Build output
+dist/
+
+# Extraction output
+Output/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Docker volumes (local)
+docker-volumes/
+
+# Sample PDFs (too large for git)
+Form/

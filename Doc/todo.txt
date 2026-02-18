@@ -1,0 +1,19 @@
+-*better image preprocessing
+-paddelOCR-VL
+-*voting system
+-checkbox
+-table
+-chart
+-multi-page support
+-better error handling
+-better UI
+-better UX
+
+
+-HITL (Human-in-the-loop)
+-UI ICONS
+
+
+ref:
+implementation_plan.md
+vlm_accuracy_research.md

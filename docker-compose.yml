@@ -1,0 +1,32 @@
+services:
+  pdfai:
+    build: .
+    ports:
+      - "8000:8000" # Backend API
+      - "5173:5173" # Frontend dev server
+    volumes:
+      # Persist model cache across restarts (downloads once, cached forever)
+      - model-cache:/app/.cache/huggingface
+      # Persist training data
+      - training-data:/app/backend/training_data
+      # Persist LoRA adapters
+      - adapters:/app/backend/adapters
+      # Mount source code for live development
+      - ./src:/app/src
+      - ./backend:/app/backend
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_HOME=/app/.cache/huggingface
+    restart: unless-stopped
+
+volumes:
+  model-cache: # ~4-15GB Hugging Face models — persists across restarts
+  training-data: # HITL training samples
+  adapters: # Trained LoRA adapters

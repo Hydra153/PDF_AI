@@ -1,0 +1,16 @@
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+transformers>=4.40.0
+torch>=2.2.0
+torchvision>=0.17.0
+bitsandbytes>=0.42.0
+accelerate>=0.27.0
+qwen-vl-utils
+einops
+pdf2image==1.17.0
+Pillow==10.2.0
+python-multipart==0.0.6
+pydantic==2.5.3
+pymupdf==1.23.8
+huggingface-hub
+numpy<2.0.0
