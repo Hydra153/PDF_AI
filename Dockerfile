@@ -34,9 +34,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 
 WORKDIR /app
 
-# Install Python dependencies first (cached layer)
+# Install Python dependencies in a virtual env (avoids system pip issues)
 COPY backend/requirements.txt ./backend/requirements.txt
-RUN pip install --no-cache-dir --break-system-packages -r backend/requirements.txt
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r backend/requirements.txt
 
 # Install npm dependencies (cached layer)
 COPY package.json package-lock.json ./
