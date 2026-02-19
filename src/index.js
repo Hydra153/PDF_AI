@@ -4,6 +4,7 @@ import {
   extractFields,
   autoFindFields as autoFindFieldsAPI,
   checkBackendHealth,
+  detectCheckboxes,
 } from "./services/api/backend.js";
 import { ReviewQueue } from "./components/review_queue.js";
 import {
@@ -104,6 +105,15 @@ function renderApp() {
         </div>
       </section>
 
+      <section class="panel" id="analysis-panel">
+        <label class="label">Document Analysis</label>
+        <p style="font-size: 0.8rem; color: var(--muted); margin: 0 0 12px 0;">Detect structured elements beyond text fields</p>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button id="detect-checkboxes-btn" disabled style="background: #8e44ad; color: white; border: none; padding: 10px 18px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 6px; transition: all 0.2s;">☑ Find All Checkboxes</button>
+        </div>
+        <div id="checkbox-results-container" style="margin-top: 16px;"></div>
+      </section>
+
       <section class="panel">
         <label class="label">Document Preview</label>
         <div id="layout-preview-container" style="margin-top: 16px; background: #fff; padding: 20px; border-radius: 8px;">
@@ -142,8 +152,11 @@ function renderApp() {
   const autoFindBtn = document.getElementById("auto-find-btn");
   const presetsBtn = document.getElementById("presets-btn");
   const presetsDropdown = document.getElementById("presets-dropdown");
+  const detectCheckboxesBtn = document.getElementById("detect-checkboxes-btn");
+  const checkboxResultsContainer = document.getElementById("checkbox-results-container");
 
   let selectedFile = null;
+  let lastCheckboxResults = null;  // Store for JSON export
 
   // Tab Navigation
   const tabExtract = document.getElementById("tab-extract");
@@ -557,6 +570,7 @@ function renderApp() {
     fileNameDisplay.innerHTML = `${icons.file(14)} <strong>${file.name}</strong>`;
     extractBtn.disabled = false;
     autoFindBtn.disabled = false;
+    detectCheckboxesBtn.disabled = false;
     statusEl.textContent = "Ready to process";
 
     // Clear review queue when new PDF selected
@@ -564,6 +578,8 @@ function renderApp() {
 
     // Clear previous results
     resultsContainer.innerHTML = "";
+    checkboxResultsContainer.innerHTML = "";
+    lastCheckboxResults = null;
 
     await renderLayoutPreview();
   }
@@ -615,6 +631,116 @@ function renderApp() {
       autoFindBtn.disabled = false;
     }
   });
+
+  // ─── Checkbox Detection Handler ───
+  detectCheckboxesBtn.addEventListener("click", async () => {
+    if (!selectedFile) return;
+
+    try {
+      detectCheckboxesBtn.disabled = true;
+      detectCheckboxesBtn.textContent = "⏳ Scanning...";
+      statusEl.textContent = "Detecting checkboxes...";
+      checkboxResultsContainer.innerHTML = `
+        <div style="text-align: center; padding: 20px; color: var(--muted);">
+          <div class="spinner" style="margin: 0 auto 12px;"></div>
+          Scanning document for checkboxes...
+        </div>`;
+
+      const result = await detectCheckboxes(selectedFile);
+
+      if (!result.checkboxes || result.checkboxes.length === 0) {
+        checkboxResultsContainer.innerHTML = `
+          <div style="text-align: center; padding: 20px; color: var(--muted);">
+            ☐ No physical checkboxes found in this document
+          </div>`;
+        statusEl.textContent = "No checkboxes found";
+        lastCheckboxResults = [];
+        return;
+      }
+
+      lastCheckboxResults = result.checkboxes;
+      renderCheckboxResults(result.checkboxes, result.time_seconds);
+      statusEl.textContent = `Found ${result.checkboxes.length} checkboxes in ${result.time_seconds}s`;
+
+    } catch (err) {
+      console.error("Checkbox detection error:", err);
+      checkboxResultsContainer.innerHTML = `
+        <div style="color: #ef4444; padding: 12px;">❌ ${err.message}</div>`;
+      statusEl.textContent = `Error: ${err.message}`;
+    } finally {
+      detectCheckboxesBtn.disabled = false;
+      detectCheckboxesBtn.textContent = "☑ Find All Checkboxes";
+    }
+  });
+
+  function renderCheckboxResults(checkboxes, timeSec) {
+    const checked = checkboxes.filter(c => c.checked).length;
+    const unchecked = checkboxes.length - checked;
+
+    let html = `
+      <div style="display: flex; gap: 12px; margin-bottom: 12px; font-size: 0.8rem; color: var(--muted);">
+        <span>☑ ${checked} checked</span>
+        <span>☐ ${unchecked} unchecked</span>
+        <span style="margin-left: auto;">${timeSec}s</span>
+      </div>
+      <div class="results-grid">`;
+
+    checkboxes.forEach((cb, i) => {
+      const icon = cb.checked ? "☑" : "☐";
+      const statusText = cb.checked ? "Checked" : "Unchecked";
+      const statusColor = cb.checked ? "#22c55e" : "#94a3b8";
+      const confPercent = Math.round(cb.confidence * 100);
+      const confColor = confPercent >= 70 ? "#22c55e" : confPercent >= 40 ? "#f59e0b" : "#ef4444";
+
+      html += `
+        <div class="result-card animate-fadeUp" style="animation-delay: ${i * 0.03}s;">
+          <div class="card-header">
+            <span class="field-name">${cb.label}</span>
+            <span class="conf-badge" style="background: ${confColor}20; color: ${confColor};">${confPercent}%</span>
+          </div>
+          <div class="field-value" style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 1.4rem; color: ${statusColor};">${icon}</span>
+            <span>${statusText}</span>
+          </div>
+        </div>`;
+    });
+
+    html += `</div>`;
+
+    // JSON actions for checkboxes
+    const exportData = checkboxes.map(c => ({
+      label: c.label,
+      checked: c.checked,
+      confidence: c.confidence,
+    }));
+
+    html += `
+      <div class="json-actions" style="margin-top: 8px;">
+        <button id="copy-checkbox-json" class="btn-secondary">📋 Copy Checkbox JSON</button>
+        <button id="download-checkbox-json" class="btn-secondary">⬇ Download Checkbox JSON</button>
+      </div>`;
+
+    checkboxResultsContainer.innerHTML = html;
+
+    // Wire up JSON actions
+    document.getElementById("copy-checkbox-json")?.addEventListener("click", () => {
+      navigator.clipboard.writeText(JSON.stringify(exportData, null, 2));
+      const btn = document.getElementById("copy-checkbox-json");
+      btn.textContent = "✓ Copied!";
+      setTimeout(() => { btn.textContent = "📋 Copy Checkbox JSON"; }, 2000);
+    });
+
+    document.getElementById("download-checkbox-json")?.addEventListener("click", () => {
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `checkboxes_${selectedFile?.name?.replace('.pdf', '') || 'doc'}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
 
   // Render Document Preview (simple PDF page image)
   async function renderLayoutPreview() {

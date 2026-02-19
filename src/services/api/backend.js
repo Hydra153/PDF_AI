@@ -107,3 +107,39 @@ export async function autoFindFields(file) {
     throw err;
   }
 }
+
+/**
+ * Detect all physical checkboxes in a PDF
+ * @param {File} file - PDF file
+ * @returns {Object} {checkboxes: [{label, checked, confidence}], count, time_seconds}
+ */
+export async function detectCheckboxes(file) {
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const response = await fetch(`${BACKEND_URL}/api/detect-checkboxes`, {
+      method: "POST",
+      body: formData,
+      signal: AbortSignal.timeout(API_TIMEOUT),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || "Checkbox detection failed");
+    }
+
+    const result = await response.json();
+
+    if (!result.success) {
+      throw new Error("Checkbox detection failed");
+    }
+
+    return result;
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error("Request timeout - document too large or backend slow");
+    }
+    throw err;
+  }
+}

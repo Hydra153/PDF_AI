@@ -222,10 +222,15 @@ async def extract_fields(
         print(f"📄 Processing PDF: {file.filename} (model: {model})")
         images, _ = process_pdf(pdf_bytes)
         
+        # Also keep raw images for checkbox fallback
+        from utils.pdf_processor import pdf_to_images
+        raw_images = pdf_to_images(pdf_bytes)
+        
         if not images:
             raise HTTPException(status_code=400, detail="Could not process PDF")
         
         image = images[0]  # TODO: Multi-page support
+        raw_image = raw_images[0] if raw_images else image
         field_labels = [f['key'] for f in fields_list]
         print(f"🤖 Extracting {len(field_labels)} fields with {model}...")
         
@@ -259,6 +264,50 @@ async def extract_fields(
                         )
                         model_confidences = extractor.get_last_confidences()
                         extraction_meta = extractor.get_last_meta()
+                    
+                    # ─── Auto-detect checkbox fields ───
+                    # If a field's value echoes its name, it's a checkbox item
+                    # (the enhanced image stripped checkbox marks).
+                    # Use batch checkbox detection on RAW image (95.5% accuracy)
+                    # then match results to the requested fields.
+                    if model == "qwen" and _qwen2vl_available:
+                        echo_fields = []
+                        for field_name, value in results.items():
+                            if isinstance(value, str) and field_name.strip().lower() == value.strip().lower():
+                                echo_fields.append(field_name)
+                        
+                        if echo_fields:
+                            print(f"   ☑️ Detected {len(echo_fields)} checkbox-style fields (value = field name)")
+                            print(f"   🔄 Running batch checkbox detection on raw image...")
+                            qwen = Qwen2VLExtractor()
+                            all_checkboxes = qwen.extract_checkboxes(raw_image, fields=None)
+                            
+                            # Build lookup: lowercase label → checkbox result
+                            cb_lookup = {}
+                            for cb in all_checkboxes:
+                                cb_lookup[cb["label"].strip().lower()] = cb
+                            
+                            # Match each echo field to detected checkboxes
+                            for field_name in echo_fields:
+                                fn_lower = field_name.strip().lower()
+                                matched = cb_lookup.get(fn_lower)
+                                
+                                # Try fuzzy match if exact not found
+                                if not matched:
+                                    for cb_label, cb_data in cb_lookup.items():
+                                        if fn_lower in cb_label or cb_label in fn_lower:
+                                            matched = cb_data
+                                            break
+                                
+                                if matched:
+                                    status_str = "Checked" if matched["checked"] else "Unchecked"
+                                    results[field_name] = status_str
+                                    model_confidences[field_name] = matched["confidence"]
+                                    print(f"      {'☑' if matched['checked'] else '☐'} '{field_name}' → {status_str} (conf: {matched['confidence']:.2f})")
+                                else:
+                                    results[field_name] = "Not Found"
+                                    model_confidences[field_name] = 0.0
+                                    print(f"      ❓ '{field_name}' → No matching checkbox found")
                     
                     _active_model = model
                     
@@ -406,7 +455,69 @@ async def auto_find_fields(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/detect-checkboxes")
+async def detect_checkboxes(file: UploadFile = File(...)):
+    """Auto-detect all physical checkboxes in a PDF document"""
+    try:
+        if not file.filename.endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        
+        pdf_bytes = await file.read()
+        if len(pdf_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+        
+        if not _qwen2vl_available:
+            raise HTTPException(status_code=503, detail="Qwen2-VL model not available")
+        
+        print(f"☑️ Detecting checkboxes in: {file.filename}")
+        # IMPORTANT: Use raw PDF images WITHOUT enhancement.
+        # The image enhancer binarizes and removes borders/lines, which
+        # destroys checkbox marks (✓, ✗, filled squares).
+        from utils.pdf_processor import pdf_to_images
+        images = pdf_to_images(pdf_bytes)
+        
+        if not images:
+            raise HTTPException(status_code=400, detail="Could not process PDF")
+        
+        image = images[0]
+        print(f"   📐 Checkbox image: {image.size[0]}x{image.size[1]} ({image.mode})")
+        
+        import time
+        t_start = time.time()
+        
+        try:
+            async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
+                async with _gpu_semaphore:
+                    print(f"🔒 GPU semaphore acquired for checkbox detection")
+                    qwen = Qwen2VLExtractor()
+                    checkboxes = qwen.extract_checkboxes(image, fields=None)
+        except TimeoutError:
+            print(f"⏱️ GPU busy — checkbox detection timed out after {_GPU_TIMEOUT_SECONDS}s")
+            raise HTTPException(
+                status_code=503,
+                detail=f"GPU busy — another operation is in progress. Try again in a moment."
+            )
+        
+        t_elapsed = time.time() - t_start
+        
+        print(f"✅ Found {len(checkboxes)} checkboxes in {t_elapsed:.1f}s")
+        
+        return {
+            "success": True,
+            "checkboxes": checkboxes,
+            "count": len(checkboxes),
+            "time_seconds": round(t_elapsed, 1),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error during checkbox detection: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─── HITL Review Endpoints ───
+
 
 @app.get("/api/reviews")
 async def get_reviews():

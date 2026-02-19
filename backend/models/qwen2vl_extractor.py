@@ -813,6 +813,464 @@ class Qwen2VLExtractor:
             return False
         return True
     
+    # ─── Checkbox Extraction ───
+    
+    def extract_checkboxes(
+        self, image: Image.Image, fields: List[str] = None
+    ) -> List[dict]:
+        """
+        Extract checkbox status from a document image.
+        
+        Two modes:
+            1. fields=None  → Auto-detect ALL physical checkboxes
+            2. fields=[...]  → Extract specified checkbox fields only
+        
+        Returns:
+            List of {"label": str, "checked": bool, "confidence": float}
+        """
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        
+        if fields:
+            # User-specified checkbox fields
+            print(f"☑️ Extracting {len(fields)} specified checkbox fields...")
+            results = []
+            for field in fields:
+                checked, confidence = self._extract_single_checkbox(image, field)
+                
+                # Zoom verification for low-confidence results
+                if confidence < 0.7:
+                    print(f"   🔬 Low confidence ({confidence:.2f}) for '{field}' — zoom verifying...")
+                    zoom_checked, zoom_conf = self._verify_checkbox_zoom(image, field)
+                    if zoom_conf > confidence:
+                        checked = zoom_checked
+                        confidence = zoom_conf
+                        print(f"   ✅ Zoom improved: '{field}' = {'Checked' if checked else 'Unchecked'} (conf: {confidence:.2f})")
+                
+                results.append({
+                    "label": field,
+                    "checked": checked,
+                    "confidence": round(confidence, 3),
+                })
+                status = "Checked" if checked else "Unchecked"
+                print(f"   {'☑' if checked else '☐'} '{field}' = {status} (conf: {confidence:.2f})")
+            
+            return results
+        else:
+            # Auto-detect all checkboxes
+            return self._detect_all_checkboxes(image)
+    
+    def _detect_all_checkboxes(self, image: Image.Image) -> List[dict]:
+        """
+        Auto-detect ALL physical checkboxes in a document image.
+        """
+        # ── Diagnostic: Ask VLM what it sees ──
+        diag_messages = [
+            {"role": "user", "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": "Describe what you see in this document image in 2-3 sentences. What type of document is it? What elements does it contain?"},
+            ]}
+        ]
+        try:
+            from qwen_vl_utils import process_vision_info
+            text = self.processor.apply_chat_template(
+                diag_messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(diag_messages)
+            inputs = self.processor(
+                text=[text], images=image_inputs, videos=video_inputs,
+                padding=True, return_tensors="pt",
+            ).to(self.device)
+            with torch.no_grad():
+                diag_out = self.model.generate(**inputs, max_new_tokens=200)
+            diag_text = self.processor.batch_decode(
+                diag_out[:, inputs["input_ids"].shape[1]:],
+                skip_special_tokens=True,
+            )[0].strip()
+            print(f"   🔍 Document description: {diag_text[:300]}")
+        except Exception as e:
+            print(f"   🔍 Diagnostic failed: {e}")
+        
+        # ── Primary: Simplified checkbox prompt ──
+        system_prompt = (
+            "You are a document form analyzer. "
+            "Extract checkbox information from the document image."
+        )
+        
+        user_prompt = (
+            "This document is a form with checkboxes next to items. "
+            "For each checkbox in the document, tell me:\n"
+            "1. What text/label is next to the checkbox\n"
+            "2. Whether the checkbox is checked (has a mark ✓✗X inside) or unchecked (empty)\n\n"
+            "Return a JSON array like this:\n"
+            '[{"label": "Item name", "checked": true}, {"label": "Other item", "checked": false}]\n\n'
+            "Return ONLY the JSON array."
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_prompt},
+                ],
+            }
+        ]
+        
+        try:
+            from qwen_vl_utils import process_vision_info
+            
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.device)
+            
+            print(f"   ☑️ Scanning document for checkboxes...")
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=2048,
+                    do_sample=True,
+                    temperature=0.1,
+                    top_p=0.9,
+                    output_scores=True,
+                    return_dict_in_generate=True,
+                )
+            
+            input_len = inputs["input_ids"].shape[1]
+            output_ids = outputs.sequences[:, input_len:]
+            
+            output_text = self.processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip()
+            
+            print(f"   📋 Checkbox raw output: {output_text[:500]}")
+            
+            # Compute overall confidence
+            overall_conf = self._compute_confidence(outputs, input_len)
+            
+            # Parse the JSON array
+            checkboxes = self._parse_checkbox_list(output_text, overall_conf)
+            
+            print(f"   📊 Found {len(checkboxes)} checkboxes")
+            
+            # If first pass found nothing, try a descriptive fallback pass
+            if not checkboxes:
+                print(f"   🔄 Pass 1 empty — trying descriptive fallback...")
+                checkboxes = self._detect_checkboxes_fallback(image)
+                if checkboxes:
+                    print(f"   📊 Fallback found {len(checkboxes)} checkboxes")
+            
+            # Zoom-verify low-confidence checkboxes
+            verified = []
+            for cb in checkboxes:
+                if cb["confidence"] < 0.7:
+                    print(f"   🔬 Zoom verifying '{cb['label']}' (conf: {cb['confidence']:.2f})...")
+                    zoom_checked, zoom_conf = self._verify_checkbox_zoom(
+                        image, cb["label"]
+                    )
+                    if zoom_conf > cb["confidence"]:
+                        cb["checked"] = zoom_checked
+                        cb["confidence"] = round(zoom_conf, 3)
+                        print(f"   ✅ Zoom improved: '{cb['label']}' = {'Checked' if zoom_checked else 'Unchecked'} (conf: {zoom_conf:.2f})")
+                
+                status = "Checked" if cb["checked"] else "Unchecked"
+                print(f"   {'☑' if cb['checked'] else '☐'} '{cb['label']}' = {status} (conf: {cb['confidence']:.2f})")
+                verified.append(cb)
+            
+            return verified
+            
+        except Exception as e:
+            logger.error(f"Checkbox detection failed: {e}")
+            print(f"   ❌ Checkbox detection error: {e}")
+            return []
+    
+    def _detect_checkboxes_fallback(self, image: Image.Image) -> List[dict]:
+        """
+        Fallback: per-item VQA checkbox detection.
+        
+        Step 1: Ask model to list all items with checkboxes
+        Step 2: For each item, ask individually if that checkbox is checked
+        
+        This avoids the 'mark everything checked' bias by forcing
+        per-item visual inspection.
+        """
+        # Step 1: Get list of all items that have checkboxes
+        system_prompt = (
+            "You are a document reader. Read the document carefully."
+        )
+        
+        user_prompt = (
+            "This document has checkboxes next to some items. "
+            "List ONLY the text labels of items that have a checkbox next to them. "
+            "Return one item per line, nothing else.\n\n"
+            "Example:\n"
+            "Fresh celery\n"
+            "Grapes\n"
+            "Ice cream"
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_prompt},
+                ],
+            }
+        ]
+        
+        try:
+            from qwen_vl_utils import process_vision_info
+            
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=1024,
+                    do_sample=True,
+                    temperature=0.1,
+                    top_p=0.9,
+                )
+            
+            input_len = inputs["input_ids"].shape[1]
+            output_ids = outputs[:, input_len:]
+            
+            items_text = self.processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip()
+            
+            print(f"   📋 Fallback items found: {items_text[:300]}")
+            
+            # Parse item list
+            items = []
+            for line in items_text.split("\n"):
+                line = line.strip().lstrip("- •*0123456789.)")
+                if line and len(line) > 1 and len(line) < 100:
+                    items.append(line)
+            
+            if not items:
+                return []
+            
+            print(f"   📊 Found {len(items)} items, now checking each...")
+            
+            # Step 2: For each item, ask if its checkbox is checked
+            checkboxes = []
+            for item in items:
+                checked, conf = self._extract_single_checkbox(image, item)
+                checkboxes.append({
+                    "label": item,
+                    "checked": checked,
+                    "confidence": round(conf, 3),
+                })
+            
+            return checkboxes
+            
+        except Exception as e:
+            logger.error(f"Checkbox fallback detection failed: {e}")
+            print(f"   ❌ Fallback error: {e}")
+            return []
+    
+    def _extract_single_checkbox(
+        self, image: Image.Image, field: str
+    ) -> Tuple[bool, float]:
+        """
+        Extract a single checkbox status from a document image.
+        
+        Uses a focused prompt asking specifically about one checkbox.
+        
+        Returns:
+            Tuple of (checked: bool, confidence: float)
+        """
+        system_prompt = (
+            "You are a checkbox state reader. "
+            "CHECKED = the box has a mark inside (✓, ✗, X, filled, darkened, any mark). "
+            "UNCHECKED = the box is empty/blank/hollow inside with no mark. "
+            "Respond with ONLY one word."
+        )
+        
+        user_prompt = (
+            f"Find the checkbox next to \"{field}\" in this document.\n"
+            f"Look INSIDE the checkbox box. Is there any mark, check, X, or filling inside?\n"
+            f"- If YES (any mark inside) → respond: checked\n"
+            f"- If NO (empty/blank inside) → respond: unchecked\n\n"
+            f"Reply with ONLY one word: checked OR unchecked"
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_prompt},
+                ],
+            }
+        ]
+        
+        try:
+            from qwen_vl_utils import process_vision_info
+            
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=32,
+                    do_sample=True,
+                    temperature=0.1,
+                    top_p=0.9,
+                    output_scores=True,
+                    return_dict_in_generate=True,
+                )
+            
+            input_len = inputs["input_ids"].shape[1]
+            output_ids = outputs.sequences[:, input_len:]
+            
+            output_text = self.processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip().lower()
+            
+            confidence = self._compute_confidence(outputs, input_len)
+            
+            # Parse response
+            checked = "check" in output_text and "uncheck" not in output_text
+            
+            return checked, confidence
+            
+        except Exception as e:
+            logger.error(f"Single checkbox extraction failed for '{field}': {e}")
+            print(f"      ❌ Checkbox error for '{field}': {e}")
+            return False, 0.0
+    
+    def _verify_checkbox_zoom(
+        self, image: Image.Image, label: str
+    ) -> Tuple[bool, float]:
+        """
+        Zoom verification for a single checkbox.
+        
+        Splits image into top/bottom halves (with 10% overlap) and re-checks
+        the checkbox at higher effective resolution.
+        
+        Returns:
+            Tuple of (checked: bool, confidence: float)
+        """
+        w, h = image.size
+        overlap = int(h * 0.10)
+        
+        # Top half: 0 to 60% of height
+        top_crop = image.crop((0, 0, w, h // 2 + overlap))
+        # Bottom half: 40% to 100% of height
+        bottom_crop = image.crop((0, h // 2 - overlap, w, h))
+        
+        crops = [("top", top_crop), ("bottom", bottom_crop)]
+        best_checked = False
+        best_conf = 0.0
+        
+        for crop_name, crop_img in crops:
+            checked, conf = self._extract_single_checkbox(crop_img, label)
+            
+            if conf > best_conf:
+                best_checked = checked
+                best_conf = conf
+                print(f"      🔍 Zoom ({crop_name}): '{label}' = {'Checked' if checked else 'Unchecked'} (conf: {conf:.3f})")
+        
+        return best_checked, best_conf
+    
+    def _parse_checkbox_list(self, output_text: str, default_conf: float = 0.5) -> List[dict]:
+        """
+        Parse a JSON array of checkbox results from model output.
+        
+        Handles markdown code blocks, partial JSON, etc.
+        
+        Returns:
+            List of {"label": str, "checked": bool, "confidence": float}
+        """
+        parsed = None
+        
+        # Try direct JSON parse
+        try:
+            parsed = json.loads(output_text)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try markdown code block
+        if parsed is None:
+            json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', output_text, re.DOTALL)
+            if json_match:
+                try:
+                    parsed = json.loads(json_match.group(1))
+                except json.JSONDecodeError:
+                    pass
+        
+        # Try finding JSON array in text
+        if parsed is None:
+            bracket_match = re.search(r'\[.*\]', output_text, re.DOTALL)
+            if bracket_match:
+                try:
+                    parsed = json.loads(bracket_match.group(0))
+                except json.JSONDecodeError:
+                    pass
+        
+        if not isinstance(parsed, list):
+            logger.warning(f"Could not parse checkbox JSON: {output_text[:200]}")
+            return []
+        
+        # Normalize and validate
+        results = []
+        for item in parsed:
+            if isinstance(item, dict) and "label" in item:
+                label = str(item["label"]).strip()
+                checked = bool(item.get("checked", False))
+                conf = float(item.get("confidence", default_conf))
+                if label:
+                    results.append({
+                        "label": label,
+                        "checked": checked,
+                        "confidence": round(conf, 3),
+                    })
+        
+        return results
+    
     def _apply_validators(self, results: Dict[str, str]) -> Dict[str, dict]:
         """
         FIX 2: Run every extracted value through validators.py.
