@@ -88,8 +88,12 @@ function renderApp() {
           </label>
         </div>
 
-        <div class="actions">
+        <div class="actions" style="display: flex; align-items: center; gap: 16px;">
            <button id="extract-btn" disabled>Extract Data</button>
+           <label id="checkbox-toggle-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 6px 14px; border-radius: 8px; border: 1px solid rgba(142, 68, 173, 0.25); background: rgba(142, 68, 173, 0.06); transition: all 0.2s; user-select: none;">
+             <input type="checkbox" id="checkbox-toggle" style="accent-color: #8e44ad; width: 16px; height: 16px;" />
+             <span style="font-weight: 500; font-size: 13px; color: #8e44ad;">☑ Checkbox Mode</span>
+           </label>
         </div>
       </section>
 
@@ -157,6 +161,7 @@ function renderApp() {
 
   let selectedFile = null;
   let lastCheckboxResults = null;  // Store for JSON export
+  let checkboxEnabled = false;  // Checkbox mode toggle state
 
   // Tab Navigation
   const tabExtract = document.getElementById("tab-extract");
@@ -259,6 +264,35 @@ function renderApp() {
         }
       }
     });
+  });
+
+  // ─── Checkbox Mode Toggle Handler ───
+  const checkboxToggle = document.getElementById("checkbox-toggle");
+  const analysisPanel = document.getElementById("analysis-panel");
+
+  // Start with analysis panel hidden (checkbox mode OFF by default)
+  if (analysisPanel) analysisPanel.style.display = "none";
+
+  checkboxToggle.addEventListener("change", (e) => {
+    checkboxEnabled = e.target.checked;
+    const toggleLabel = document.getElementById("checkbox-toggle-label");
+
+    if (checkboxEnabled) {
+      if (analysisPanel) analysisPanel.style.display = "block";
+      if (toggleLabel) {
+        toggleLabel.style.background = "rgba(142, 68, 173, 0.15)";
+        toggleLabel.style.borderColor = "rgba(142, 68, 173, 0.5)";
+      }
+    } else {
+      if (analysisPanel) analysisPanel.style.display = "none";
+      if (toggleLabel) {
+        toggleLabel.style.background = "rgba(142, 68, 173, 0.06)";
+        toggleLabel.style.borderColor = "rgba(142, 68, 173, 0.25)";
+      }
+      // Clear checkbox results when disabling
+      checkboxResultsContainer.innerHTML = "";
+      lastCheckboxResults = null;
+    }
   });
 
   function updateModelBadge(selected, models) {
@@ -678,10 +712,15 @@ function renderApp() {
     const unchecked = checkboxes.length - checked;
 
     let html = `
-      <div style="display: flex; gap: 12px; margin-bottom: 12px; font-size: 0.8rem; color: var(--muted);">
+      <div style="display: flex; gap: 12px; margin-bottom: 12px; font-size: 0.8rem; color: var(--muted); align-items: center;">
         <span>☑ ${checked} checked</span>
         <span>☐ ${unchecked} unchecked</span>
         <span style="margin-left: auto;">${timeSec}s</span>
+      </div>
+      <div style="display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
+        <button id="merge-checkboxes-btn" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">🔗 Merge into Results</button>
+        <button id="copy-checkbox-json" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">📋 Copy JSON</button>
+        <button id="download-checkbox-json" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">⬇ Download</button>
       </div>
       <div class="results-grid">`;
 
@@ -693,45 +732,100 @@ function renderApp() {
       const confColor = confPercent >= 70 ? "#22c55e" : confPercent >= 40 ? "#f59e0b" : "#ef4444";
 
       html += `
-        <div class="result-card animate-fadeUp" style="animation-delay: ${i * 0.03}s;">
+        <div class="result-card animate-fadeUp cb-card" data-cb-index="${i}" data-cb-checked="${cb.checked}" style="animation-delay: ${i * 0.03}s; cursor: pointer;" title="Click to toggle">
           <div class="card-header">
             <span class="field-name">${cb.label}</span>
             <span class="conf-badge" style="background: ${confColor}20; color: ${confColor};">${confPercent}%</span>
           </div>
           <div class="field-value" style="display: flex; align-items: center; gap: 8px;">
-            <span style="font-size: 1.4rem; color: ${statusColor};">${icon}</span>
-            <span>${statusText}</span>
+            <span class="cb-icon" style="font-size: 1.4rem; color: ${statusColor};">${icon}</span>
+            <span class="cb-status">${statusText}</span>
           </div>
         </div>`;
     });
 
     html += `</div>`;
+    checkboxResultsContainer.innerHTML = html;
 
-    // JSON actions for checkboxes
-    const exportData = checkboxes.map(c => ({
+    // Wire up toggle on each checkbox card
+    checkboxResultsContainer.querySelectorAll(".cb-card").forEach((card) => {
+      card.addEventListener("click", () => {
+        const idx = parseInt(card.dataset.cbIndex);
+        const cb = lastCheckboxResults[idx];
+        if (!cb) return;
+
+        // Toggle state
+        cb.checked = !cb.checked;
+        card.dataset.cbChecked = cb.checked;
+
+        // Update visual
+        const iconEl = card.querySelector(".cb-icon");
+        const statusEl = card.querySelector(".cb-status");
+        iconEl.textContent = cb.checked ? "☑" : "☐";
+        iconEl.style.color = cb.checked ? "#22c55e" : "#94a3b8";
+        statusEl.textContent = cb.checked ? "Checked" : "Unchecked";
+
+        // Flash animation
+        card.style.transform = "scale(0.97)";
+        setTimeout(() => { card.style.transform = ""; }, 150);
+      });
+    });
+
+    // Merge into Results button
+    document.getElementById("merge-checkboxes-btn")?.addEventListener("click", () => {
+      if (!lastCheckboxResults || lastCheckboxResults.length === 0) return;
+
+      // Build merged data: existing extraction + checkbox states
+      const mergedData = {};
+      // Add existing extraction data first
+      if (typeof currentExtractionData !== "undefined") {
+        for (const [k, v] of Object.entries(currentExtractionData)) {
+          if (k !== "_meta") mergedData[k] = v;
+        }
+      }
+      // Add checkbox results
+      lastCheckboxResults.forEach(cb => {
+        mergedData[cb.label] = cb.checked ? "Checked" : "Unchecked";
+      });
+
+      // Re-render main results with merged data
+      currentExtractionData = mergedData;
+      renderResults(resultsContainer, mergedData);
+
+      // Visual feedback
+      const btn = document.getElementById("merge-checkboxes-btn");
+      if (btn) {
+        btn.textContent = "✓ Merged!";
+        btn.style.background = "rgba(34, 197, 94, 0.15)";
+        btn.style.color = "#22c55e";
+        setTimeout(() => {
+          btn.textContent = "🔗 Merge into Results";
+          btn.style.background = "";
+          btn.style.color = "";
+        }, 2000);
+      }
+
+      statusEl.textContent = `Merged ${lastCheckboxResults.length} checkboxes into results`;
+    });
+
+    // JSON export data
+    const getExportData = () => lastCheckboxResults.map(c => ({
       label: c.label,
       checked: c.checked,
       confidence: c.confidence,
     }));
 
-    html += `
-      <div class="json-actions" style="margin-top: 8px;">
-        <button id="copy-checkbox-json" class="btn-secondary">📋 Copy Checkbox JSON</button>
-        <button id="download-checkbox-json" class="btn-secondary">⬇ Download Checkbox JSON</button>
-      </div>`;
-
-    checkboxResultsContainer.innerHTML = html;
-
-    // Wire up JSON actions
+    // Copy JSON
     document.getElementById("copy-checkbox-json")?.addEventListener("click", () => {
-      navigator.clipboard.writeText(JSON.stringify(exportData, null, 2));
+      navigator.clipboard.writeText(JSON.stringify(getExportData(), null, 2));
       const btn = document.getElementById("copy-checkbox-json");
       btn.textContent = "✓ Copied!";
-      setTimeout(() => { btn.textContent = "📋 Copy Checkbox JSON"; }, 2000);
+      setTimeout(() => { btn.textContent = "📋 Copy JSON"; }, 2000);
     });
 
+    // Download JSON
     document.getElementById("download-checkbox-json")?.addEventListener("click", () => {
-      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify(getExportData(), null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -819,7 +913,7 @@ function renderApp() {
         statusEl.textContent = `Extracting with ${modelName}...`;
       }
 
-      const extractedData = await extractFields(selectedFile, CURRENT_FIELDS, selectedModel, votingRounds);
+      const extractedData = await extractFields(selectedFile, CURRENT_FIELDS, selectedModel, votingRounds, checkboxEnabled);
 
       console.log(
         `--- ${modelName.toUpperCase()} OUTPUT (JSON) ---`,

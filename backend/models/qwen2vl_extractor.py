@@ -899,11 +899,14 @@ class Qwen2VLExtractor:
         
         user_prompt = (
             "This document is a form with checkboxes next to items. "
-            "For each checkbox in the document, tell me:\n"
+            "Scan the ENTIRE document thoroughly — top to bottom, left to right. "
+            "Do NOT skip any checkboxes, even if the text is small or hard to read.\n\n"
+            "For EVERY checkbox in the document, tell me:\n"
             "1. What text/label is next to the checkbox\n"
             "2. Whether the checkbox is checked (has a mark ✓✗X inside) or unchecked (empty)\n\n"
             "Return a JSON array like this:\n"
             '[{"label": "Item name", "checked": true}, {"label": "Other item", "checked": false}]\n\n'
+            "IMPORTANT: Include ALL checkboxes. Count them to make sure you haven't missed any.\n"
             "Return ONLY the JSON array."
         )
         
@@ -1568,3 +1571,5 @@ class Qwen2VLExtractor:
                 matched[field] = ""
         
         return matched
+
+

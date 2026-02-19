@@ -36,7 +36,7 @@ export async function checkBackendHealth() {
  * @param {number} votingRounds - Number of voting passes (default: 1, use 3 for accuracy boost)
  * @returns {Object} Extracted field values
  */
-export async function extractFields(file, fields, model = "paddleocr", votingRounds = 1) {
+export async function extractFields(file, fields, model = "paddleocr", votingRounds = 1, checkboxEnabled = false) {
   try {
     const formData = new FormData();
     formData.append("file", file);
@@ -45,6 +45,7 @@ export async function extractFields(file, fields, model = "paddleocr", votingRou
     if (votingRounds > 1) {
       formData.append("voting_rounds", votingRounds.toString());
     }
+    formData.append("checkbox_enabled", checkboxEnabled ? "true" : "false");
 
     const response = await fetch(`${BACKEND_URL}/api/extract`, {
       method: "POST",

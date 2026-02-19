@@ -247,6 +247,12 @@ export class ReviewQueue {
                 const confPercent = Math.round((item.confidence || 0.3) * 100);
                 const confColor = confPercent >= 70 ? 'var(--accent)' : (confPercent >= 40 ? '#f59e0b' : '#ef4444');
 
+                // Detect checkbox items
+                const isCheckbox = item.ai_value === 'Checked' || item.ai_value === 'Unchecked';
+                const cbChecked = item.ai_value === 'Checked';
+                const cbIcon = cbChecked ? '☑' : '☐';
+                const cbFlipped = cbChecked ? 'Unchecked' : 'Checked';
+
                 html += `
                     <div class="review-card animate-fadeUp" id="card-${item.id}" style="animation-delay: ${idx * 0.05}s;">
                         <div class="card-top">
@@ -258,12 +264,15 @@ export class ReviewQueue {
                             <button class="btn-delete-card" data-id="${item.id}" title="Remove">${icons.trash(14)}</button>
                         </div>
                         <div class="card-prediction">
-                            <span class="muted">AI:</span> ${item.ai_value || '<em>Empty</em>'}
+                            <span class="muted">AI:</span> ${isCheckbox ? `<span style="font-size: 1.1rem;">${cbIcon}</span> ` : ''}${item.ai_value || '<em>Empty</em>'}
                         </div>
                         <div class="card-actions">
                             <button class="btn-approve" data-id="${item.id}">${icons.check(14)} Approve</button>
-                            <input type="text" id="input-${item.id}" placeholder="Correct value..." />
-                            <button class="btn-correct" data-id="${item.id}">${icons.edit(14)}</button>
+                            ${isCheckbox
+                                ? `<button class="btn-cb-toggle" data-id="${item.id}" data-flipped="${cbFlipped}" style="padding: 6px 14px; background: rgba(142, 68, 173, 0.1); color: #8e44ad; border: 1px solid rgba(142, 68, 173, 0.3); border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 500;">${cbChecked ? '☐ Mark Unchecked' : '☑ Mark Checked'}</button>`
+                                : `<input type="text" id="input-${item.id}" placeholder="Correct value..." />
+                                   <button class="btn-correct" data-id="${item.id}">${icons.edit(14)}</button>`
+                            }
                         </div>
                     </div>
                 `;
@@ -316,6 +325,14 @@ export class ReviewQueue {
         // Delete buttons
         this.container.querySelectorAll('.btn-delete-card').forEach(btn => {
             btn.addEventListener('click', () => this.deleteItem(btn.dataset.id));
+        });
+
+        // Checkbox toggle buttons (flip Checked ↔ Unchecked)
+        this.container.querySelectorAll('.btn-cb-toggle').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const flippedValue = btn.dataset.flipped;
+                this.resolveItem(btn.dataset.id, 'correct', flippedValue);
+            });
         });
 
         // Export button

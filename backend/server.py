@@ -180,6 +180,7 @@ async def extract_fields(
     fields: str = Form(...),
     model: str = Form("paddleocr"),  # "paddleocr" (default) or "qwen"
     voting_rounds: int = Form(1),    # 1 = normal, 3 = accuracy boost (majority voting)
+    checkbox_enabled: str = Form("false"),  # "true" = run checkbox auto-detection
 ):
     """
     Extract specified fields from PDF document using Qwen2-VL.
@@ -265,39 +266,60 @@ async def extract_fields(
                         model_confidences = extractor.get_last_confidences()
                         extraction_meta = extractor.get_last_meta()
                     
-                    # ─── Auto-detect checkbox fields ───
-                    # If a field's value echoes its name, it's a checkbox item
-                    # (the enhanced image stripped checkbox marks).
-                    # Use batch checkbox detection on RAW image (95.5% accuracy)
-                    # then match results to the requested fields.
-                    if model == "qwen" and _qwen2vl_available:
+                    # ─── Auto-detect checkbox fields (only when checkbox mode enabled) ───
+                    cb_enabled = checkbox_enabled.lower() == "true"
+                    if cb_enabled and model == "qwen" and _qwen2vl_available:
+                        # Normalize helper: strip spaces/punctuation for comparison
+                        def _norm(s):
+                            return ''.join(s.strip().lower().split())  # "Blue Berries" → "blueberries"
+                        
                         echo_fields = []
                         for field_name, value in results.items():
-                            if isinstance(value, str) and field_name.strip().lower() == value.strip().lower():
-                                echo_fields.append(field_name)
+                            if isinstance(value, str):
+                                # Match: exact OR normalized (e.g. "Blue Berries" == "Blueberries")
+                                if (field_name.strip().lower() == value.strip().lower() or
+                                    _norm(field_name) == _norm(value)):
+                                    echo_fields.append(field_name)
                         
                         if echo_fields:
-                            print(f"   ☑️ Detected {len(echo_fields)} checkbox-style fields (value = field name)")
+                            print(f"   ☑️ Detected {len(echo_fields)} checkbox-style fields (value ≈ field name)")
                             print(f"   🔄 Running batch checkbox detection on raw image...")
                             qwen = Qwen2VLExtractor()
                             all_checkboxes = qwen.extract_checkboxes(raw_image, fields=None)
                             
-                            # Build lookup: lowercase label → checkbox result
+                            # Build lookup: lowercase label → checkbox result + normalized lookup
                             cb_lookup = {}
+                            cb_norm_lookup = {}
                             for cb in all_checkboxes:
                                 cb_lookup[cb["label"].strip().lower()] = cb
+                                cb_norm_lookup[_norm(cb["label"])] = cb
                             
                             # Match each echo field to detected checkboxes
                             for field_name in echo_fields:
                                 fn_lower = field_name.strip().lower()
+                                fn_norm = _norm(field_name)
                                 matched = cb_lookup.get(fn_lower)
                                 
-                                # Try fuzzy match if exact not found
+                                # Try normalized match (Blue Berries → blueberries)
+                                if not matched:
+                                    matched = cb_norm_lookup.get(fn_norm)
+                                
+                                # Try fuzzy substring match
                                 if not matched:
                                     for cb_label, cb_data in cb_lookup.items():
                                         if fn_lower in cb_label or cb_label in fn_lower:
                                             matched = cb_data
                                             break
+                                
+                                # ─── Single-item VQA fallback for missed fields (e.g. Turkey) ───
+                                if not matched:
+                                    print(f"      🔍 '{field_name}' not in batch — trying single-item VQA...")
+                                    try:
+                                        is_checked, conf = qwen._extract_single_checkbox(raw_image, field_name)
+                                        matched = {"label": field_name, "checked": is_checked, "confidence": conf}
+                                        print(f"      {'☑' if is_checked else '☐'} Single-item: '{field_name}' → {'Checked' if is_checked else 'Unchecked'} (conf: {conf:.2f})")
+                                    except Exception as e:
+                                        print(f"      ⚠️ Single-item fallback failed for '{field_name}': {e}")
                                 
                                 if matched:
                                     status_str = "Checked" if matched["checked"] else "Unchecked"
