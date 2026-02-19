@@ -1028,7 +1028,94 @@ button.hoverable:active {
 .btn-secondary:hover {
   background: var(--bg);
   border-color: var(--accent);
+  color: var(--fg);
 }
+
+/* ========================================
+   RESULT CARDS
+   ======================================== */
+
+.result-card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  box-shadow: 0 1px 4px var(--shadow);
+  transition: box-shadow 0.2s;
+}
+
+.result-card:hover {
+  box-shadow: 0 3px 12px var(--shadow);
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.field-name {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.field-value {
+  font-size: 0.95rem;
+  color: var(--fg);
+  font-weight: 500;
+  word-break: break-word;
+  min-height: 1.4em;
+}
+
+.card-footer {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.btn-icon {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.75rem;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+}
+
+.btn-icon:hover {
+  background: var(--bg);
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.btn-flag:hover {
+  color: #f59e0b;
+  border-color: #f59e0b;
+}
+
+.btn-delete-result:hover {
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+/* JSON Actions */
+.json-actions {
+  display: flex;
+  gap: 8px;
+  padding: 12px 0;
+  flex-wrap: wrap;
+}
+
 
 /* ========================================
    REVIEW QUEUE COMPACT (Phase 2 Fix)
