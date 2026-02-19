@@ -1017,6 +1017,7 @@ button.hoverable:active {
 .btn-secondary {
   background: var(--panel);
   border: 1px solid var(--panel-border);
+  color: var(--fg);
   padding: 8px 14px;
   border-radius: 6px;
   font-size: 0.85rem;
