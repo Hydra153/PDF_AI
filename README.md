@@ -56,6 +56,10 @@ PDF AI/
 └── start.bat                  # Launcher
 ```
 
+## Notes
+
+- **Model Updates**: `HF_HUB_OFFLINE=1` is set in `docker-compose.yml` to skip HuggingFace server checks on startup (faster boot). To update the model to a newer version, temporarily remove this line, restart the container to re-download, then add it back.
+
 ## Requirements
 
 - Python 3.10+

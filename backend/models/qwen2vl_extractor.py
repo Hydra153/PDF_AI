@@ -729,6 +729,84 @@ class Qwen2VLExtractor:
             print(f"      ❌ Error: {e}")
             return ""
     
+    def ask_question(
+        self, image: Image.Image, question: str
+    ) -> str:
+        """
+        Answer a natural language question about a document image.
+        
+        Unlike _extract_single_field (which is tuned for label→value extraction),
+        this uses a general-purpose VQA prompt that handles:
+        - Checkbox status ("Is X checked?")
+        - Yes/no questions ("Does the form have a signature?")
+        - Counting ("How many items are listed?")
+        - Summary ("What type of document is this?")
+        - Value extraction ("What is the total amount?")
+        """
+        system_prompt = (
+            "You are a document analysis assistant. "
+            "Read the document image carefully and answer the user's question. "
+            "For checkbox questions, indicate whether each item is checked (✓), unchecked (☐), or crossed (✗). "
+            "For yes/no questions, answer clearly with Yes or No followed by a brief explanation. "
+            "For value questions, return the exact text as it appears in the document. "
+            "Be concise and accurate. If the answer is not visible in the document, say so."
+        )
+        
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": question},
+                ],
+            }
+        ]
+        
+        try:
+            from qwen_vl_utils import process_vision_info
+            
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=True,
+                    temperature=0.2,
+                    top_p=0.9,
+                )
+            
+            input_len = inputs["input_ids"].shape[1]
+            output_ids = outputs[:, input_len:]
+            
+            output_text = self.processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip()
+            
+            return output_text if output_text else ""
+            
+        except Exception as e:
+            logger.error(f"Q&A failed for '{question}': {e}")
+            print(f"      ❌ Q&A Error: {e}")
+            return ""
+    
     def _zoom_extract_field(
         self, image: Image.Image, field: str
     ) -> str:

@@ -675,7 +675,7 @@ async def ask_question(
                         _active_model = "paddleocr"
                     else:
                         qwen = Qwen2VLExtractor()
-                        answer = qwen._extract_single_field(image, question.strip())
+                        answer = qwen.ask_question(image, question.strip())
                         _active_model = "qwen"
                         
         except TimeoutError:

@@ -24,6 +24,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_HOME=/app/.cache/huggingface
+      - HF_HUB_OFFLINE=1
     restart: unless-stopped
 
 volumes:
