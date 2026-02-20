@@ -66,10 +66,10 @@ export function createChat(containerEl) {
     </div>
     <div class="chat-input-bar">
       <div class="chat-input-wrapper">
-        <input type="text" class="chat-input" placeholder="Ask a question..." disabled />
+        <input type="text" class="chat-input" placeholder="Ask a question..." />
         <span class="chat-disclaimer">AI can make mistakes. Please verify important information.</span>
       </div>
-      <button class="chat-send-btn" disabled title="Send">${icons.send(16)}</button>
+      <button class="chat-send-btn" title="Send">${icons.send(16)}</button>
     </div>
   `;
 
@@ -96,10 +96,20 @@ export function createChat(containerEl) {
     toggle.classList.remove("active");
   }
 
-  toggle.addEventListener("click", () => {
+  toggle.addEventListener("click", (e) => {
+    e.stopPropagation();
     _isOpen ? closeChat() : openChat();
   });
   closeBtn.addEventListener("click", closeChat);
+
+  // Click outside to close
+  document.addEventListener("click", (e) => {
+    if (_isOpen && !panel.contains(e.target) && !toggle.contains(e.target)) {
+      closeChat();
+    }
+  });
+  // Prevent clicks inside panel from bubbling to document
+  panel.addEventListener("click", (e) => e.stopPropagation());
 
   // ─── Render Messages ───
   function renderMessages() {
@@ -125,7 +135,7 @@ export function createChat(containerEl) {
         const isLoading = msg.text === "__loading__";
         return `
           <div class="chat-bubble ai" data-id="${msg.id}">
-            <div class="chat-bubble-text">${isLoading
+            <div class="chat-bubble-text${isLoading ? '' : (msg.isSystem ? ' chat-system-msg' : '')}">${isLoading
               ? `<span class="chat-loading">${icons.loader(14)} Thinking...</span>`
               : escapeHtml(msg.text)
             }</div>
@@ -176,17 +186,29 @@ export function createChat(containerEl) {
 
   // ─── Send Question ───
   async function sendQuestion(questionText) {
-    if (!_file || !questionText.trim() || _isLoading) return;
+    if (!questionText.trim() || _isLoading) return;
 
     _isLoading = true;
     inputEl.disabled = true;
     sendBtn.disabled = true;
 
-    // Check for predefined answers first
+    // Check for predefined answers first (works even without a file)
     const predefined = getPredefinedAnswer(questionText);
     if (predefined) {
       _messages.push({ role: "user", text: questionText.trim(), id: _uid() });
-      _messages.push({ role: "ai", text: predefined, id: _uid(), time: 0 });
+      const aiId = _uid();
+      _messages.push({ role: "ai", text: "__loading__", id: aiId });
+      renderMessages();
+
+      // Fake delay (1-2s) to feel natural
+      const fakeDelay = 1000 + Math.random() * 1000;
+      await new Promise(r => setTimeout(r, fakeDelay));
+
+      const aiMsg = _messages.find(m => m.id === aiId);
+      if (aiMsg) {
+        aiMsg.text = predefined;
+        aiMsg.time = (fakeDelay / 1000).toFixed(1);
+      }
       _isLoading = false;
       inputEl.disabled = false;
       sendBtn.disabled = false;
@@ -198,7 +220,7 @@ export function createChat(containerEl) {
     // Need a file for document questions
     if (!_file) {
       _messages.push({ role: "user", text: questionText.trim(), id: _uid() });
-      _messages.push({ role: "ai", text: "Please upload a PDF document first, then I can answer questions about its contents.", id: _uid() });
+      _messages.push({ role: "ai", text: "Please upload a PDF document first, then I can answer questions about its contents.", id: _uid(), isSystem: true });
       _isLoading = false;
       inputEl.disabled = false;
       sendBtn.disabled = false;
@@ -218,16 +240,20 @@ export function createChat(containerEl) {
 
     try {
       const result = await askQuestion(_file, questionText.trim(), _model);
-      // Replace loading with answer
       const aiMsg = _messages.find(m => m.id === aiId);
       if (aiMsg) {
         aiMsg.text = result.answer;
         aiMsg.time = result.time_seconds;
+        // Mark system messages like "No answer found"
+        if (result.answer === "No answer found.") {
+          aiMsg.isSystem = true;
+        }
       }
     } catch (err) {
       const aiMsg = _messages.find(m => m.id === aiId);
       if (aiMsg) {
         aiMsg.text = `Error: ${err.message}`;
+        aiMsg.isSystem = true;
       }
     }
 

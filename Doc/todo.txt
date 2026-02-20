@@ -20,3 +20,10 @@
 ref:
 implementation_plan.md
 vlm_accuracy_research.md
+
+
+few UI fix.
+send button is not aligned to textbox.
+Not found is systems result, not answer to user question, so that must be in diffrent color.
+also when click outside of doc QnA- that should also close QnA window.
+when send predefine answer like Hi,hello,etc.. make is delay like actual question processing ans show how long that take, make it random from 1 to 2 sec
