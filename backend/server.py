@@ -566,6 +566,169 @@ async def detect_checkboxes(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── Document Q&A ───
+
+@app.post("/api/ask")
+async def ask_question(
+    file: UploadFile = File(...),
+    question: str = Form(...),
+    model: str = Form("qwen"),
+):
+    """
+    Ask a natural language question about a PDF document.
+    Independent from field extraction — uses VQA for ad-hoc queries.
+    """
+    try:
+        if not file.filename.endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        
+        pdf_bytes = await file.read()
+        if len(pdf_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+        
+        if not question or not question.strip():
+            raise HTTPException(status_code=400, detail="Question is required")
+        
+        # Validate model
+        if model == "qwen" and not _qwen2vl_available:
+            raise HTTPException(status_code=503, detail="Qwen2-VL not available")
+        if model == "paddleocr" and not _paddleocr_available:
+            raise HTTPException(status_code=503, detail="PaddleOCR-VL not available")
+        
+        # Process PDF → image (use enhanced image for better readability)
+        images, _ = process_pdf(pdf_bytes)
+        if not images:
+            raise HTTPException(status_code=400, detail="Could not process PDF")
+        
+        image = images[0]
+        t_start = time.time()
+        
+        try:
+            async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
+                async with _gpu_semaphore:
+                    global _active_model
+                    
+                    # VRAM swap if needed
+                    if _active_model and _active_model != model:
+                        if _active_model == "qwen" and _paddleocr_available:
+                            unload_qwen2vl_model()
+                        elif _active_model == "paddleocr" and _qwen2vl_available:
+                            unload_paddleocr_pipeline()
+                    
+                    if model == "paddleocr":
+                        extractor = PaddleOCRExtractor()
+                        answer = extractor.extract(image, [], [], [question.strip()])
+                        # PaddleOCR returns a dict
+                        answer = answer.get(question.strip(), "")
+                        _active_model = "paddleocr"
+                    else:
+                        qwen = Qwen2VLExtractor()
+                        answer = qwen._extract_single_field(image, question.strip())
+                        _active_model = "qwen"
+                        
+        except TimeoutError:
+            raise HTTPException(
+                status_code=503,
+                detail="GPU busy — try again in a moment."
+            )
+        
+        t_elapsed = time.time() - t_start
+        
+        return {
+            "success": True,
+            "answer": answer if answer else "No answer found.",
+            "time_seconds": round(t_elapsed, 1),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Q&A error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/re-extract")
+async def re_extract_field(
+    file: UploadFile = File(...),
+    field_name: str = Form(...),
+    model: str = Form("qwen"),
+):
+    """
+    Re-extract a single field from a PDF.
+    Used for the 'resend' button on result cards.
+    """
+    try:
+        if not file.filename.endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        
+        pdf_bytes = await file.read()
+        if len(pdf_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+        
+        if not field_name or not field_name.strip():
+            raise HTTPException(status_code=400, detail="Field name is required")
+        
+        # Validate model
+        if model == "qwen" and not _qwen2vl_available:
+            raise HTTPException(status_code=503, detail="Qwen2-VL not available")
+        if model == "paddleocr" and not _paddleocr_available:
+            raise HTTPException(status_code=503, detail="PaddleOCR-VL not available")
+        
+        # Process PDF → image
+        images, _ = process_pdf(pdf_bytes)
+        if not images:
+            raise HTTPException(status_code=400, detail="Could not process PDF")
+        
+        image = images[0]
+        field = field_name.strip()
+        t_start = time.time()
+        
+        try:
+            async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
+                async with _gpu_semaphore:
+                    global _active_model
+                    
+                    if _active_model and _active_model != model:
+                        if _active_model == "qwen" and _paddleocr_available:
+                            unload_qwen2vl_model()
+                        elif _active_model == "paddleocr" and _qwen2vl_available:
+                            unload_paddleocr_pipeline()
+                    
+                    if model == "paddleocr":
+                        extractor = PaddleOCRExtractor()
+                        results = extractor.extract(image, [], [], [field])
+                        value = results.get(field, "")
+                        signal = "paddleocr"
+                        _active_model = "paddleocr"
+                    else:
+                        qwen = Qwen2VLExtractor()
+                        value = qwen._extract_single_field(image, field)
+                        signal = "re-extract"
+                        _active_model = "qwen"
+                        
+        except TimeoutError:
+            raise HTTPException(
+                status_code=503,
+                detail="GPU busy — try again in a moment."
+            )
+        
+        t_elapsed = time.time() - t_start
+        
+        return {
+            "success": True,
+            "field": field,
+            "value": value if value else "",
+            "signal": signal,
+            "time_seconds": round(t_elapsed, 1),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Re-extract error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─── HITL Review Endpoints ───
 
 

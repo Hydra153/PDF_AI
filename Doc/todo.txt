@@ -8,11 +8,14 @@
 -better error handling
 -better UI
 -better UX
-
-
 -HITL (Human-in-the-loop)
 -UI ICONS
-
+1)questions
+2)radio
+3)resend 
+4)table
+5)UI
+6)Section extraction
 
 ref:
 implementation_plan.md

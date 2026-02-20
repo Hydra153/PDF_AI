@@ -5,8 +5,11 @@ import {
   autoFindFields as autoFindFieldsAPI,
   checkBackendHealth,
   detectCheckboxes,
+  askQuestion,
+  reExtractField,
 } from "./services/api/backend.js";
 import { ReviewQueue } from "./components/review_queue.js";
+import { createChat } from "./components/chat.js";
 import {
   extractLayoutFromPDF,
   pdfPageToImage,
@@ -173,6 +176,9 @@ function renderApp() {
   // Initialize ReviewQueue
   const reviewQueue = new ReviewQueue(reviewContainer);
 
+  // Initialize Chat Panel
+  const chatPanel = createChat(document.body);
+
   // Clear queue on page load - ensures consistent state
   // Reviews only make sense with a PDF loaded, so start fresh
   // Guard: backend may not be ready yet at page load time
@@ -252,6 +258,9 @@ function renderApp() {
 
       // Update badge
       updateModelBadge(selected);
+
+      // Update chat model
+      chatPanel.setModel(selected);
 
       // Show/hide voting checkbox (Qwen only)
       const votingDiv = document.getElementById("voting-option");
@@ -606,6 +615,9 @@ function renderApp() {
     autoFindBtn.disabled = false;
     detectCheckboxesBtn.disabled = false;
     statusEl.textContent = "Ready to process";
+
+    // Update chat with new file
+    chatPanel.setFile(file);
 
     // Clear review queue when new PDF selected
     await reviewQueue.clearQueue();
@@ -1072,8 +1084,9 @@ function renderApp() {
           ${flagPills ? `<div class="flag-pills">${flagPills}</div>` : ""}
           <div class="field-value">${displayValue}</div>
           <div class="card-footer">
+            <button class="btn-icon btn-resend" data-field="${key}" title="Re-extract">${icons.refreshCw(14)}</button>
             <button class="btn-icon btn-flag" data-field="${key}" data-value="${safeValue}" data-signal="${source || 'manual_flag'}" title="Flag for review">${icons.alertCircle(14)}</button>
-            <button class="btn-icon btn-delete-result" data-field="${key}" title="Remove">✕</button>
+            <button class="btn-icon btn-delete-result" data-field="${key}" title="Remove">${icons.x(14)}</button>
           </div>
         </div>
       `;
@@ -1181,6 +1194,72 @@ function renderApp() {
         } catch (err) {
           console.error("Failed to flag:", err);
           btn.innerHTML = icons.alertCircle(14);
+        }
+      });
+    });
+
+    // Resend buttons (re-extract single field)
+    container.querySelectorAll(".btn-resend").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const fieldName = btn.dataset.field;
+        if (!selectedFile) return;
+
+        const card = btn.closest(".result-card");
+        const valueEl = card.querySelector(".field-value");
+        const originalHtml = btn.innerHTML;
+
+        try {
+          btn.innerHTML = icons.loader(14);
+          btn.disabled = true;
+          btn.querySelector("svg").style.animation = "spin 1s linear infinite";
+          valueEl.style.opacity = "0.4";
+
+          const selectedModel =
+            document.querySelector('input[name="model-select"]:checked')?.value || "qwen";
+          const result = await reExtractField(selectedFile, fieldName, selectedModel);
+
+          // Update card
+          const newValue = result.value || "";
+          valueEl.textContent = newValue || "\u2014";
+          valueEl.style.opacity = "1";
+          card.dataset.raw = newValue;
+          card.dataset.normalized = newValue;
+
+          // Update data
+          currentExtractionData[fieldName] = newValue;
+
+          // Update signal badge
+          const badge = card.querySelector(".signal-badge");
+          if (badge) badge.innerHTML = `${icons.refreshCw(11)} re-extract`;
+
+          // Update JSON preview
+          const jsonOut = document.getElementById("json-output");
+          if (jsonOut) {
+            const exportData = {};
+            for (const [k, v] of Object.entries(currentExtractionData)) {
+              if (k !== "_meta") exportData[k] = v;
+            }
+            jsonOut.textContent = JSON.stringify(exportData, null, 2);
+          }
+
+          // Flash success
+          btn.innerHTML = icons.check(14);
+          btn.style.color = "var(--accent)";
+          setTimeout(() => {
+            btn.innerHTML = originalHtml;
+            btn.style.color = "";
+            btn.disabled = false;
+          }, 1500);
+        } catch (err) {
+          console.error("Re-extract failed:", err);
+          valueEl.style.opacity = "1";
+          btn.innerHTML = icons.alertCircle(14);
+          btn.style.color = "#e74c3c";
+          setTimeout(() => {
+            btn.innerHTML = originalHtml;
+            btn.style.color = "";
+            btn.disabled = false;
+          }, 2000);
         }
       });
     });
