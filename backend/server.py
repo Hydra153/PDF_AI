@@ -104,6 +104,64 @@ _extraction_context = {
 _gpu_semaphore = asyncio.Semaphore(1)
 _GPU_TIMEOUT_SECONDS = 300  # Max wait time — PaddleOCR-VL first load can take ~60-120s
 
+# ─── Image Cache ───
+# Caches processed (enhanced) and raw images per PDF to avoid redundant
+# PDF→image conversion + enhancement on every /api/ask or /api/re-extract call.
+# Keyed by MD5 hash of PDF bytes. In-memory only — cleared on new PDF or server restart.
+import hashlib
+
+_image_cache = {
+    "hash": None,        # MD5 of the cached PDF
+    "filename": None,    # Original filename
+    "enhanced": None,    # Enhanced PIL Image (from process_pdf)
+    "raw": None,         # Raw PIL Image (from pdf_to_images)
+}
+
+def get_or_process_pdf(pdf_bytes, filename="", need_raw=False):
+    """
+    Return cached images if the PDF hasn't changed, otherwise process and cache.
+    Returns (enhanced_image, raw_image_or_None).
+    """
+    global _image_cache
+    pdf_hash = hashlib.md5(pdf_bytes).hexdigest()
+    
+    if _image_cache["hash"] == pdf_hash and _image_cache["enhanced"] is not None:
+        # Cache hit — but lazily load raw if needed and not yet cached
+        if need_raw and _image_cache["raw"] is None:
+            from utils.pdf_processor import pdf_to_images
+            raw_images = pdf_to_images(pdf_bytes)
+            _image_cache["raw"] = raw_images[0] if raw_images else _image_cache["enhanced"]
+        raw = _image_cache["raw"] if need_raw else None
+        return _image_cache["enhanced"], raw
+    
+    # Cache miss — process PDF
+    images, _ = process_pdf(pdf_bytes)
+    if not images:
+        return None, None
+    
+    enhanced = images[0]
+    raw = None
+    
+    if need_raw:
+        from utils.pdf_processor import pdf_to_images
+        raw_images = pdf_to_images(pdf_bytes)
+        raw = raw_images[0] if raw_images else enhanced
+    
+    # Store in cache
+    _image_cache = {
+        "hash": pdf_hash,
+        "filename": filename,
+        "enhanced": enhanced,
+        "raw": raw,
+    }
+    
+    return enhanced, raw
+
+def clear_image_cache():
+    """Clear the image cache (called when PDF changes or server shuts down)."""
+    global _image_cache
+    _image_cache = {"hash": None, "filename": None, "enhanced": None, "raw": None}
+
 def save_extraction_context(image, filename, page_num=1, fields=None, results=None,
                            signals=None, model_used="qwen", voting_rounds=1):
     """Save complete extraction context for training data collection."""
@@ -219,20 +277,16 @@ async def extract_fields(
         if model not in ("qwen", "paddleocr"):
             raise HTTPException(status_code=400, detail=f"Unknown model: {model}. Use 'qwen' or 'paddleocr'")
         
-        # Process PDF → Image
+        # Process PDF → Image (cached)
         t_start = time.time()
         print(f"📄 Processing PDF: {file.filename} (model: {model})")
-        images, _ = process_pdf(pdf_bytes)
+        image, raw_image = get_or_process_pdf(pdf_bytes, file.filename, need_raw=True)
         
-        # Also keep raw images for checkbox fallback
-        from utils.pdf_processor import pdf_to_images
-        raw_images = pdf_to_images(pdf_bytes)
-        
-        if not images:
+        if not image:
             raise HTTPException(status_code=400, detail="Could not process PDF")
         
-        image = images[0]  # TODO: Multi-page support
-        raw_image = raw_images[0] if raw_images else image
+        if not raw_image:
+            raw_image = image
         field_labels = [f['key'] for f in fields_list]
         print(f"🤖 Extracting {len(field_labels)} fields with {model}...")
         
@@ -595,12 +649,10 @@ async def ask_question(
         if model == "paddleocr" and not _paddleocr_available:
             raise HTTPException(status_code=503, detail="PaddleOCR-VL not available")
         
-        # Process PDF → image (use enhanced image for better readability)
-        images, _ = process_pdf(pdf_bytes)
-        if not images:
+        # Process PDF → image (cached — avoids re-processing on every question)
+        image, _ = get_or_process_pdf(pdf_bytes, file.filename)
+        if not image:
             raise HTTPException(status_code=400, detail="Could not process PDF")
-        
-        image = images[0]
         t_start = time.time()
         
         try:
@@ -674,12 +726,10 @@ async def re_extract_field(
         if model == "paddleocr" and not _paddleocr_available:
             raise HTTPException(status_code=503, detail="PaddleOCR-VL not available")
         
-        # Process PDF → image
-        images, _ = process_pdf(pdf_bytes)
-        if not images:
+        # Process PDF → image (cached)
+        image, _ = get_or_process_pdf(pdf_bytes, file.filename)
+        if not image:
             raise HTTPException(status_code=400, detail="Could not process PDF")
-        
-        image = images[0]
         field = field_name.strip()
         t_start = time.time()
         
