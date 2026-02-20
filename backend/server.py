@@ -686,9 +686,22 @@ async def ask_question(
         
         t_elapsed = time.time() - t_start
         
+        # Handle sentinel responses from the model
+        answer_type = "answer"  # normal answer
+        if not answer:
+            answer = "No answer found."
+            answer_type = "system"
+        elif "NOT_DOCUMENT_RELATED" in answer.upper():
+            answer = "This question doesn't seem related to the document. Try asking about specific fields, values, or content in the PDF."
+            answer_type = "system"
+        elif "NOT_FOUND_IN_DOCUMENT" in answer.upper():
+            answer = "This information was not found in the document."
+            answer_type = "system"
+        
         return {
             "success": True,
-            "answer": answer if answer else "No answer found.",
+            "answer": answer,
+            "answer_type": answer_type,
             "time_seconds": round(t_elapsed, 1),
         }
         

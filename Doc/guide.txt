@@ -1,0 +1,435 @@
+================================================================================
+PDF AI — Project Guide (for Claude on 3070 TI Machine)
+================================================================================
+Last Updated: 2026-02-20
+
+This document is a comprehensive reference for understanding, setting up, and
+working on the PDF AI project. Read this BEFORE making any changes.
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+PDF AI is an intelligent document extraction system. Users upload PDFs and the
+system extracts structured data (field names → values) using Vision Language
+Models (VLMs). It also has a Document Q&A chat feature.
+
+Key Capabilities:
+  - Upload PDF → AI extracts specified fields → Returns JSON
+  - Document Q&A chat (independent from extraction)
+  - Checkbox detection (checked/unchecked items)
+  - Human-in-the-loop (HITL) review queue for flagged fields
+  - Field presets (save/load commonly used field sets)
+  - Smart Scan (auto-detect document fields)
+  - Majority voting (run extraction N times, take consensus)
+  - Image enhancement pipeline (thresholding, border removal, smart crop)
+  - In-memory image cache (avoids re-processing same PDF)
+
+Tech Stack:
+  - Backend: Python 3.11, FastAPI, PyTorch, Transformers (HuggingFace)
+  - Frontend: Vanilla JS + Vite (no React/Vue/Angular)
+  - Models: Qwen2.5-VL (primary), PaddleOCR-VL (secondary)
+  - Deployment: Docker with NVIDIA GPU passthrough
+  - Container: nvidia/cuda:12.1.0-devel-ubuntu22.04
+
+================================================================================
+2. MODEL CONFIGURATION — Qwen2.5-VL-7B on 3070 TI (8GB VRAM)
+================================================================================
+
+The model auto-selects based on VRAM via config.py:
+
+  VRAM >= 10 GB  → Qwen2.5-VL-7B-Instruct  (best, 95% DocVQA)
+  VRAM >= 3.5 GB → Qwen2.5-VL-3B-Instruct  (good, 92% DocVQA)
+  VRAM < 3.5 GB  → Qwen2-VL-2B-Instruct    (basic, 88% DocVQA)
+
+3070 TI has 8GB VRAM. With the current thresholds:
+  - It will auto-select Qwen2.5-VL-3B (since 8 < 10 threshold)
+  - To FORCE Qwen2.5-VL-7B, set environment variable:
+      QWEN_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
+
+  In docker-compose.yml, add under environment:
+      - QWEN_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
+
+  WARNING: 7B in 4-bit quantization uses ~5-6GB VRAM. On 8GB card this is tight.
+  If you get CUDA OOM (out of memory) errors, revert to 3B model.
+
+  OR adjust the threshold in config.py, line 23:
+      (8.0, "Qwen/Qwen2.5-VL-7B-Instruct", "Qwen2.5-VL-7B"),
+
+All models use 4-bit NF4 quantization (bitsandbytes) to fit in consumer GPUs.
+
+================================================================================
+3. DOCKER SETUP & RUNNING
+================================================================================
+
+Prerequisites:
+  - Docker Desktop installed
+  - NVIDIA Container Toolkit installed (nvidia-docker)
+  - NVIDIA GPU driver installed
+  - WSL2 (if Windows)
+
+First Time Setup:
+  1. Clone repo:           git clone https://github.com/Hydra153/PDF_AI.git
+  2. Build container:       docker compose build
+     (This takes 10-20 min — installs CUDA, Python, npm, etc.)
+  3. First run:             docker compose up
+     (First run downloads models from HuggingFace — 2-8GB depending on model)
+     (Models are cached in Docker volume 'model-cache' — persists across restarts)
+
+Daily Usage:
+  - Start:                  docker compose up -d
+  - Stop:                   docker compose down
+  - Rebuild after changes:  docker compose build && docker compose up -d
+  - View logs:              docker compose logs -f
+  - Shell into container:   docker compose exec pdfai bash
+
+Ports:
+  - Backend API:     http://localhost:8000
+  - Frontend:        http://localhost:5173
+  - API Docs:        http://localhost:8000/docs  (Swagger UI)
+
+Docker Volumes (persist across restarts):
+  - model-cache:     HuggingFace model weights (~2-8GB)
+  - training-data:   HITL training samples collected from user corrections
+  - adapters:        Trained LoRA adapters (future fine-tuning)
+
+Environment Variables (docker-compose.yml):
+  - NVIDIA_VISIBLE_DEVICES=all     — GPU access
+  - HF_HOME=/app/.cache/huggingface — Model cache path
+  - HF_HUB_OFFLINE=1                — Skip HuggingFace server checks (faster boot)
+  - QWEN_MODEL=...                  — Override model selection (optional)
+
+IMPORTANT: HF_HUB_OFFLINE=1 means the container won't check for model updates.
+To update models, temporarily remove this line, restart, let it re-download.
+
+Live Development:
+  Source code is mounted as volumes (./src and ./backend), so:
+  - Frontend changes: Edit src/ files → Vite hot-reloads automatically
+  - Backend changes: Edit backend/ files → Restart container (backend doesn't hot-reload)
+
+Without Docker (local dev):
+  - Start:  .\start.bat  (Windows) or ./start.sh (Linux)
+  - This starts backend (python server.py) and frontend (npm run dev) separately
+
+================================================================================
+4. API ENDPOINTS
+================================================================================
+
+POST /api/extract
+  - Main extraction endpoint
+  - Params: file (PDF), fields (JSON), model ("qwen"|"paddleocr"),
+            voting_rounds (1|3), checkbox_enabled ("true"|"false")
+  - Returns: { results, signals, time_seconds, model_used }
+
+POST /api/ask
+  - Document Q&A chat (independent from extraction)
+  - Params: file (PDF), question (string), model ("qwen"|"paddleocr")
+  - Returns: { answer, answer_type ("answer"|"system"), time_seconds }
+  - answer_type "system" = non-answer (off-topic, not found, etc.)
+
+POST /api/re-extract
+  - Re-extract a single field (resend button on result cards)
+  - Params: file (PDF), field_name (string), model
+  - Returns: { field, value, signal, time_seconds }
+
+POST /api/detect-checkboxes
+  - Detect checked/unchecked checkboxes in a PDF
+  - Params: file (PDF), model
+  - Returns: { checkboxes[], count, time_seconds }
+
+POST /api/smart-scan
+  - Auto-detect what fields exist in a document
+  - Params: file (PDF), model
+  - Returns: { fields[], time_seconds }
+
+GET  /api/health         — Backend health + model status
+GET  /api/reviews        — Get HITL review queue
+POST /api/reviews        — Add item to review queue
+POST /api/reviews/approve/{id} — Approve a reviewed item
+DELETE /api/reviews/{id} — Delete a review item
+DELETE /api/reviews/clear — Clear all reviews
+
+================================================================================
+5. FILE STRUCTURE — COMPLETE LISTING
+================================================================================
+
+PDF AI/
+├── Dockerfile                    Docker multi-stage build (frontend + backend)
+├── docker-compose.yml            Container config, GPU, volumes, env vars
+├── package.json                  Frontend npm config (Vite, pdfjs-dist)
+├── index.html                    HTML entry point (mounts #app)
+├── start.bat                     Windows launcher (start both servers)
+├── start.sh                      Linux launcher
+├── hitl_store.json               HITL review queue persistence file
+├── README.md                     Project README
+│
+├── backend/                    ─── PYTHON BACKEND ───
+│   ├── server.py                 ★ MAIN FILE — FastAPI server, all API endpoints
+│   │                               ~940 lines. Routes, GPU semaphore, image cache,
+│   │                               VRAM swap logic, HITL endpoints, training data
+│   │
+│   ├── config.py                 Model auto-selection based on VRAM, resolution
+│   │                               config, quantization settings, directory paths
+│   │
+│   ├── hitl_manager.py           Human-in-the-loop review queue manager
+│   │                               Stores flagged fields, approve/reject workflow
+│   │
+│   ├── training_collector.py     Collects approved HITL corrections as training data
+│   │                               Saves JSON samples for future LoRA fine-tuning
+│   │
+│   ├── train_qwen2vl.py          LoRA fine-tuning script for Qwen2-VL
+│   │                               (Prepared but not actively used yet)
+│   │
+│   ├── requirements.txt          Python dependencies
+│   │
+│   ├── models/                 ─── AI MODEL EXTRACTORS ───
+│   │   ├── __init__.py
+│   │   ├── qwen2vl_extractor.py  ★ CORE — Qwen2.5-VL extractor (~1600 lines)
+│   │   │                           - Single field extraction (_extract_single_field)
+│   │   │                           - Document Q&A (ask_question)
+│   │   │                           - Zoom extraction (_zoom_extract_field)
+│   │   │                           - Smart scan (detect_fields)
+│   │   │                           - Checkbox detection
+│   │   │                           - Majority voting
+│   │   │                           - 4-bit quantization, GPU management
+│   │   │
+│   │   ├── paddleocr_extractor.py PaddleOCR-VL extractor (alternative model)
+│   │   │                           - Uses PP-ChatOCRv3-doc pipeline
+│   │   │                           - Different extraction approach
+│   │   │
+│   │   └── validators.py         Field value validators & normalizers
+│   │                               - Date, phone, email, currency formatting
+│   │                               - Confidence scoring & format detection
+│   │
+│   ├── utils/                  ─── PROCESSING UTILITIES ───
+│   │   ├── __init__.py
+│   │   ├── pdf_processor.py      PDF → PIL Image conversion (300 DPI)
+│   │   │                           Calls image_enhancer for preprocessing
+│   │   │
+│   │   └── image_enhancer.py     ★ Image preprocessing pipeline:
+│   │                               1. Adaptive thresholding (clean backgrounds)
+│   │                               2. Table border removal (OpenCV morphology)
+│   │                               3. Smart crop (remove empty margins)
+│   │                               4. Brightness/contrast enhancement
+│   │                               Scan vs digital PDF auto-detection
+│   │
+│   ├── training_data/            Collected HITL training samples (JSON files)
+│   └── adapters/                 Trained LoRA adapter weights (future)
+│
+├── src/                        ─── JAVASCRIPT FRONTEND ───
+│   ├── index.js                  ★ MAIN FILE — Full UI logic (~1350 lines)
+│   │                               - File upload, field management, presets
+│   │                               - Extract button handler, results rendering
+│   │                               - Smart scan, checkbox detection toggling
+│   │                               - Result cards with resend/flag/delete buttons
+│   │                               - JSON export, PDF preview (canvas rendering)
+│   │                               - Tab navigation (Extract / Review Queue)
+│   │                               - Model selector (Qwen / PaddleOCR radio buttons)
+│   │                               - Voting toggle, status indicators
+│   │
+│   ├── components/             ─── UI COMPONENTS ───
+│   │   ├── chat.js               Document Q&A slide-out panel
+│   │   │                           - Toggle button ("Ask AI"), glassmorphism panel
+│   │   │                           - User/AI message bubbles with markdown rendering
+│   │   │                           - Copy, Retry buttons on AI answers
+│   │   │                           - Predefined answers (hi, help, thanks, etc.)
+│   │   │                           - Gibberish detection (vowel ratio check)
+│   │   │                           - Suggested question chips when doc loaded
+│   │   │                           - Time estimate (~45s) on first query
+│   │   │                           - Click-outside-to-close
+│   │   │                           - System message styling (not found, errors)
+│   │   │
+│   │   ├── icons.js              SVG icon library (inline SVGs, no external deps)
+│   │   │                           Icons: file, x, check, copy, download, search,
+│   │   │                           loader, alertCircle, chevronDown, save,
+│   │   │                           database, trash, edit, eye, crosshair, zap,
+│   │   │                           send, refreshCw, messageSquare, chevronRight
+│   │   │
+│   │   └── review_queue.js       HITL review queue UI component
+│   │                               - Review cards with approve/reject/edit
+│   │                               - Badge counter on Review Queue tab
+│   │
+│   ├── services/               ─── API & SERVICE LAYER ───
+│   │   ├── api/
+│   │   │   └── backend.js        Backend API client (all fetch calls)
+│   │   │                           - extractFields, detectCheckboxes, smartScan
+│   │   │                           - askQuestion, reExtractField
+│   │   │                           - checkBackendHealth
+│   │   │                           - HITL: getReviews, submitReview, approveReview
+│   │   │
+│   │   ├── pdf_helpers.js        PDF.js rendering (canvas preview)
+│   │   └── utils.js              Utility functions (debounce, etc.)
+│   │
+│   ├── styles/                 ─── CSS ───
+│   │   ├── global.css            ★ All styles (~1900 lines)
+│   │   │                           App layout, cards, buttons, forms, modals,
+│   │   │                           animations, chat panel, review queue,
+│   │   │                           checkbox results, presets dropdown
+│   │   │
+│   │   └── theme.css             CSS variables (minimal)
+│   │
+│   ├── config/                   Frontend config (API base URL, etc.)
+│   ├── hooks/                    (Empty — reserved for future use)
+│   ├── state/                    (Empty — reserved for future use)
+│   └── api/                      (Empty — legacy, use services/api instead)
+│
+├── Form/                         Test PDF forms (CPL forms, invoices, checkbox docs)
+├── Output/                       Console output logs for debugging
+├── Doc/                          Project documentation and notes
+│   ├── guide.txt                 THIS FILE — comprehensive project guide
+│   ├── todo.txt                  Current TODO/feature wishlist
+│   └── Qwen.md                   Qwen model research notes
+│
+├── assets/                       Static assets
+├── public/                       Public files (Vite serves these as-is)
+└── dist/                         Built frontend (generated by `npm run build`)
+
+================================================================================
+6. GPU RESOURCE MANAGEMENT
+================================================================================
+
+The system has a single GPU and two models (Qwen + PaddleOCR) that can't both
+fit in VRAM simultaneously. The system handles this via:
+
+1. GPU Semaphore (asyncio.Semaphore(1)):
+   - Only 1 GPU inference at a time
+   - Requests queue if GPU is busy
+   - 300s timeout → returns 503
+
+2. VRAM Swap:
+   - If using model A and request comes for model B:
+     - Unload model A from VRAM
+     - Load model B
+   - Tracked via _active_model variable
+
+3. Image Cache:
+   - Processed images cached by MD5 hash of PDF bytes
+   - Avoids re-running enhancement pipeline on every /api/ask call
+   - Cache auto-invalidates when different PDF is uploaded
+   - In-memory only — cleared on server restart
+
+================================================================================
+7. IMAGE ENHANCEMENT PIPELINE (utils/image_enhancer.py)
+================================================================================
+
+Every PDF goes through this pipeline before model inference:
+
+  PDF bytes → pdf2image (300 DPI) → Enhancement pipeline → PIL Image
+
+Pipeline steps:
+  1. Scan vs Digital detection (brightness/contrast analysis)
+  2. Adaptive thresholding (clean up noisy backgrounds → white)
+  3. Table border removal (OpenCV morphological operations)
+  4. Smart crop (remove empty margins — sometimes removes 70%+ whitespace)
+  5. Brightness/contrast enhancement (normalize to good range)
+
+Results are cached (see GPU Resource Management above).
+
+================================================================================
+8. EXTRACTION FLOW (how a field gets extracted)
+================================================================================
+
+User clicks "Extract" →
+  Frontend (index.js) calls extractFields() in backend.js →
+    POST /api/extract with PDF file + field list →
+      server.py reads PDF bytes, calls get_or_process_pdf() (cached) →
+        If Qwen: Qwen2VLExtractor._extract_single_field() for each field
+        If PaddleOCR: PaddleOCRExtractor.extract()
+      → validators.py validates/normalizes each value →
+    Returns JSON { results, signals, time_seconds } →
+  Frontend renders result cards with resend/flag/delete buttons
+
+================================================================================
+9. DOCUMENT Q&A FLOW
+================================================================================
+
+User opens chat panel → types question →
+  Frontend (chat.js):
+    1. Check predefined answers (hi, help, who are you)
+    2. Check gibberish (vowel ratio < 15%)
+    3. If passes, call askQuestion() in backend.js
+  POST /api/ask with PDF + question →
+    server.py: get_or_process_pdf() (cached) →
+      Qwen2VLExtractor.ask_question() with VQA prompt →
+    Server checks for sentinel responses:
+      NOT_DOCUMENT_RELATED → answer_type: "system"
+      NOT_FOUND_IN_DOCUMENT → answer_type: "system"
+    Returns { answer, answer_type, time_seconds }
+  Frontend:
+    - Renders markdown (bold, lists, newlines)
+    - System messages shown in muted italic style
+    - Copy + Retry buttons on every AI response
+
+================================================================================
+10. CURRENT STATE & KNOWN ISSUES
+================================================================================
+
+Working Features:
+  ✓ PDF upload + preview
+  ✓ Field extraction (Qwen + PaddleOCR)
+  ✓ Smart Scan (auto-detect fields)
+  ✓ Checkbox detection
+  ✓ Document Q&A chat (with markdown rendering)
+  ✓ Field resend (re-extract single field)
+  ✓ HITL review queue
+  ✓ Field presets (save/load)
+  ✓ Majority voting (Qwen only)
+  ✓ JSON export
+  ✓ Image cache (avoid redundant processing)
+
+Known Limitations:
+  - Single-page only (uses first page of multi-page PDFs)
+  - VLM model sometimes:
+    → Answers off-topic questions with document dumps (improved via prompt but not 100%)
+    → Hallucinates on gibberish input (now caught by frontend detection)
+    → Slow first query (~30-45s for model warmup + image processing)
+  - 3B model may miss subtle field values vs 7B model
+
+Not Yet Implemented:
+  - Multi-page PDF support
+  - LoRA fine-tuning pipeline (scripts exist but untested)
+  - Batch processing (multiple PDFs at once)
+  - User authentication
+  - Cloud deployment (currently local Docker only)
+
+================================================================================
+11. IMPORTANT CODE PATTERNS
+================================================================================
+
+- Backend uses `global _active_model` for VRAM swap tracking
+- GPU operations wrapped in: async with asyncio.timeout() → async with _gpu_semaphore
+- Frontend uses vanilla JS (no framework) — all in index.js + component files
+- Chat component is self-contained: createChat(containerEl) returns API object
+- Icons are inline SVGs generated by functions: icons.check(14) → SVG string
+- CSS uses CSS custom properties: --fg, --accent, --muted, --bg
+- All API calls go through src/services/api/backend.js
+- Error handling: try/catch in endpoints, 503 for GPU busy, 400 for bad input
+
+================================================================================
+12. QUICK REFERENCE — COMMON TASKS
+================================================================================
+
+Add a new API endpoint:
+  1. Add route in backend/server.py
+  2. Add API function in src/services/api/backend.js
+  3. Wire it up in src/index.js or relevant component
+
+Add a new icon:
+  1. Add SVG path function in src/components/icons.js
+  2. Export it from the icons object
+
+Change model:
+  - Set QWEN_MODEL env var in docker-compose.yml
+  - Or adjust VRAM thresholds in backend/config.py
+
+Change image processing:
+  - Edit backend/utils/image_enhancer.py
+
+Change extraction prompts:
+  - Qwen field extraction: qwen2vl_extractor.py → _extract_single_field()
+  - Qwen Q&A: qwen2vl_extractor.py → ask_question()
+  - Qwen checkbox: qwen2vl_extractor.py → detect_checkboxes()
+
+================================================================================
+END OF GUIDE
+================================================================================

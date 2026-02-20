@@ -1642,6 +1642,42 @@ button.hoverable:active {
   opacity: 0.5;
 }
 
+/* ─── Suggested Question Chips ─── */
+.chat-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  width: 100%;
+  max-width: 280px;
+}
+
+.chat-suggestion-chip {
+  background: rgba(47, 111, 94, 0.06);
+  border: 1px solid rgba(47, 111, 94, 0.15);
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 0.78rem;
+  color: var(--fg, #1b1b1b);
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+  line-height: 1.35;
+}
+
+.chat-suggestion-chip:hover {
+  background: rgba(47, 111, 94, 0.12);
+  border-color: rgba(47, 111, 94, 0.3);
+  transform: translateY(-1px);
+}
+
+/* ─── Time Estimate in Loading ─── */
+.chat-time-est {
+  font-size: 0.7rem;
+  opacity: 0.5;
+  margin-left: 4px;
+}
+
 /* ─── Message Bubbles ─── */
 .chat-bubble {
   max-width: 88%;
@@ -1675,6 +1711,22 @@ button.hoverable:active {
   font-size: 0.84rem;
   line-height: 1.55;
   word-break: break-word;
+}
+
+/* Markdown inside chat bubbles */
+.chat-bubble-text ul,
+.chat-bubble-text ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.chat-bubble-text li {
+  margin: 2px 0;
+}
+
+.chat-bubble-text strong {
+  font-weight: 600;
+  color: var(--fg, #1b1b1b);
 }
 
 /* ─── Bubble Action Buttons ─── */
@@ -1735,7 +1787,7 @@ button.hoverable:active {
 /* ─── Chat Input Bar ─── */
 .chat-input-bar {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 12px 14px;
   border-top: 1px solid rgba(40, 40, 40, 0.07);
@@ -1797,6 +1849,8 @@ button.hoverable:active {
 .chat-send-btn {
   width: 38px;
   height: 38px;
+  min-height: 38px;
+  margin-top: 1px;
   border: none;
   border-radius: 10px;
   background: var(--fg, #1b1b1b);

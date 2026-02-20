@@ -19,6 +19,14 @@ export function createChat(containerEl) {
   let _messages = []; // { role: "user"|"ai", text: string, time?: number, id: string }
   let _isOpen = false;
   let _isLoading = false;
+  let _isFirstQuery = true;  // Track first query for time estimate
+
+  // Suggested questions shown when a document is loaded
+  const _suggestedQuestions = [
+    "What is this document about?",
+    "Describe the document in detail",
+    "List all fields in the document",
+  ];
 
   // Predefined answers for general/non-document questions
   const _predefined = {
@@ -35,6 +43,44 @@ export function createChat(containerEl) {
   function getPredefinedAnswer(text) {
     const normalized = text.toLowerCase().replace(/[?!.,]/g, "").trim();
     return _predefined[normalized] || null;
+  }
+
+  // Gibberish detection — blocks random keyboard mashing from wasting GPU
+  function isGibberish(text) {
+    const clean = text.replace(/[^a-zA-Z]/g, "").toLowerCase();
+    if (clean.length < 3) return false; // too short to judge
+    const vowels = (clean.match(/[aeiou]/g) || []).length;
+    const vowelRatio = vowels / clean.length;
+    // Natural language has ~35-45% vowels. Gibberish has far less.
+    if (vowelRatio < 0.15 && clean.length > 5) return true;
+    // Check for repeating patterns or no real words
+    const words = text.trim().split(/\s+/);
+    const avgWordLen = clean.length / Math.max(words.length, 1);
+    if (avgWordLen > 15) return true; // single super-long "word"
+    return false;
+  }
+
+  // Simple markdown → HTML renderer
+  function renderMarkdown(text) {
+    let html = escapeHtml(text);
+    // Bold: **text** → <strong>text</strong>
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    // Bullet lists: lines starting with - 
+    html = html.replace(/^- (.+)$/gm, '{{LI}}$1{{/LI}}');
+    // Numbered lists: lines starting with 1. 2. etc
+    html = html.replace(/^\d+\.\s(.+)$/gm, '{{LI}}$1{{/LI}}');
+    // Group consecutive list items into <ul>
+    html = html.replace(/({{LI}}.*?{{\/LI}}\n?)+/g, (match) => {
+      const items = match.replace(/{{LI}}(.*?){{\/LI}}\n?/g, '<li>$1</li>');
+      return `<ul>${items}</ul>`;
+    });
+    // Newlines → <br> (but not inside lists)
+    html = html.replace(/\n/g, '<br>');
+    // Clean stray <br> around block elements
+    html = html.replace(/<br><ul>/g, '<ul>');
+    html = html.replace(/<\/ul><br>/g, '</ul>');
+    html = html.replace(/<br><\/ul>/g, '</ul>');
+    return html;
   }
 
   // Generate unique IDs for messages
@@ -66,10 +112,10 @@ export function createChat(containerEl) {
     </div>
     <div class="chat-input-bar">
       <div class="chat-input-wrapper">
-        <input type="text" class="chat-input" placeholder="Ask a question..." />
+        <input type="text" class="chat-input" placeholder="Upload a PDF to start..." disabled />
         <span class="chat-disclaimer">AI can make mistakes. Please verify important information.</span>
       </div>
-      <button class="chat-send-btn" title="Send">${icons.send(16)}</button>
+      <button class="chat-send-btn" disabled title="Send">${icons.send(16)}</button>
     </div>
   `;
 
@@ -114,13 +160,26 @@ export function createChat(containerEl) {
   // ─── Render Messages ───
   function renderMessages() {
     if (_messages.length === 0) {
+      const suggestionsHtml = _file ? `
+        <div class="chat-suggestions">
+          ${_suggestedQuestions.map(q => `<button class="chat-suggestion-chip">${q}</button>`).join("")}
+        </div>
+      ` : "";
       messagesEl.innerHTML = `
         <div class="chat-empty">
           <div class="chat-empty-icon">${icons.messageSquare(32)}</div>
           <p>Ask anything about your document</p>
-          <span>${_file ? "Type your question below" : "Upload a PDF first"}</span>
+          <span>${_file ? "Try one of these questions" : "Upload a PDF first"}</span>
+          ${suggestionsHtml}
         </div>
       `;
+      // Bind suggestion chip clicks
+      messagesEl.querySelectorAll(".chat-suggestion-chip").forEach(chip => {
+        chip.addEventListener("click", () => {
+          inputEl.value = chip.textContent;
+          sendBtn.click();
+        });
+      });
       return;
     }
 
@@ -136,8 +195,8 @@ export function createChat(containerEl) {
         return `
           <div class="chat-bubble ai" data-id="${msg.id}">
             <div class="chat-bubble-text${isLoading ? '' : (msg.isSystem ? ' chat-system-msg' : '')}">${isLoading
-              ? `<span class="chat-loading">${icons.loader(14)} Thinking...</span>`
-              : escapeHtml(msg.text)
+              ? `<span class="chat-loading">${icons.loader(14)} Thinking...${_isFirstQuery ? ' <span class="chat-time-est">~45s</span>' : ''}</span>`
+              : renderMarkdown(msg.text)
             }</div>
             ${!isLoading ? `
               <div class="chat-bubble-actions">
@@ -192,9 +251,13 @@ export function createChat(containerEl) {
     inputEl.disabled = true;
     sendBtn.disabled = true;
 
-    // Check for predefined answers first (works even without a file)
+    // Check for predefined answers first
     const predefined = getPredefinedAnswer(questionText);
     if (predefined) {
+      // Need a file for predefined to make sense (chat clears on upload)
+      if (!_file) {
+        return; // shouldn't happen since input is disabled
+      }
       _messages.push({ role: "user", text: questionText.trim(), id: _uid() });
       const aiId = _uid();
       _messages.push({ role: "ai", text: "__loading__", id: aiId });
@@ -229,6 +292,28 @@ export function createChat(containerEl) {
       return;
     }
 
+    // Detect gibberish before wasting GPU time
+    if (isGibberish(questionText)) {
+      _messages.push({ role: "user", text: questionText.trim(), id: _uid() });
+      const aiId = _uid();
+      _messages.push({ role: "ai", text: "__loading__", id: aiId });
+      renderMessages();
+      const fakeDelay = 800 + Math.random() * 700;
+      await new Promise(r => setTimeout(r, fakeDelay));
+      const aiMsg = _messages.find(m => m.id === aiId);
+      if (aiMsg) {
+        aiMsg.text = "I couldn't understand that. Try asking a clear question about the document";
+        aiMsg.isSystem = true;
+        aiMsg.time = (fakeDelay / 1000).toFixed(1);
+      }
+      _isLoading = false;
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      renderMessages();
+      inputEl.focus();
+      return;
+    }
+
     // Add user message
     const userMsg = { role: "user", text: questionText.trim(), id: _uid() };
     _messages.push(userMsg);
@@ -244,8 +329,9 @@ export function createChat(containerEl) {
       if (aiMsg) {
         aiMsg.text = result.answer;
         aiMsg.time = result.time_seconds;
-        // Mark system messages like "No answer found"
-        if (result.answer === "No answer found.") {
+        _isFirstQuery = false;  // Subsequent queries won't show ~45s
+        // Mark system messages from backend
+        if (result.answer_type === "system") {
           aiMsg.isSystem = true;
         }
       }
