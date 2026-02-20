@@ -105,7 +105,7 @@ class PaddleOCRExtractor:
 
     def __init__(self):
         self.pipeline = get_paddleocr_pipeline()
-        self._last_confidences: Dict[str, float] = {}
+        self._last_signals: Dict[str, dict] = {}
         self._last_meta: Dict = {}
 
     def extract(
@@ -182,13 +182,19 @@ class PaddleOCRExtractor:
         t_elapsed = time.time() - t_start
         logger.info(f"✅ PaddleOCR-VL extraction: {len(results)} fields in {t_elapsed:.1f}s")
 
-        self._last_confidences = {
-            f: (0.85 if v else 0.0) for f, v in results.items()
+        self._last_signals = {
+            f: {
+                "source": "paddleocr",
+                "flags": [] if v else ["empty_value"],
+                "detail": "PaddleOCR-VL extraction" if v else "PaddleOCR returned empty",
+            }
+            for f, v in results.items()
         }
         self._last_meta = {
             "extraction_model": "paddleocr-vl-1.5",
             "time_seconds": round(t_elapsed, 1),
             "markdown_length": len(markdown_text),
+            "signals": dict(self._last_signals),
             "validation": {
                 f: {
                     "is_valid": bool(v),
@@ -533,8 +539,8 @@ class PaddleOCRExtractor:
 
         return None
 
-    def get_last_confidences(self) -> Dict[str, float]:
-        return self._last_confidences
+    def get_last_signals(self) -> Dict[str, dict]:
+        return self._last_signals
 
     def get_last_meta(self) -> Dict:
         return self._last_meta

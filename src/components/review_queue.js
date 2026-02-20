@@ -244,8 +244,13 @@ export class ReviewQueue {
         } else {
             html += `<div class="review-list">`;
             pendingItems.forEach((item, idx) => {
-                const confPercent = Math.round((item.confidence || 0.3) * 100);
-                const confColor = confPercent >= 70 ? 'var(--accent)' : (confPercent >= 40 ? '#f59e0b' : '#ef4444');
+                const signal = item.signal || 'unknown';
+                const reason = item.reason || '';
+                const signalIcons = {
+                    batch: '⚡', fallback: '🔍', voting: '🗳️', paddleocr: '📄',
+                    checkbox_batch: '☑', checkbox_vqa: '🔍', manual_flag: '🚩', unknown: '❓',
+                };
+                const sIcon = signalIcons[signal] || '❓';
 
                 // Detect checkbox items
                 const isCheckbox = item.ai_value === 'Checked' || item.ai_value === 'Unchecked';
@@ -260,9 +265,10 @@ export class ReviewQueue {
                                 <span class="card-field">${item.field_name}</span>
                                 <span class="card-file muted">${icons.file(12)} ${item.filename}</span>
                             </div>
-                            <div class="card-conf" style="color: ${confColor};">${confPercent}%</div>
+                            <span class="signal-badge">${sIcon} ${signal}</span>
                             <button class="btn-delete-card" data-id="${item.id}" title="Remove">${icons.trash(14)}</button>
                         </div>
+                        ${reason ? `<div class="card-reason muted" style="font-size: 0.72rem; padding: 4px 12px; color: var(--text-muted, #94a3b8);">${reason}</div>` : ''}
                         <div class="card-prediction">
                             <span class="muted">AI:</span> ${isCheckbox ? `<span style="font-size: 1.1rem;">${cbIcon}</span> ` : ''}${item.ai_value || '<em>Empty</em>'}
                         </div>

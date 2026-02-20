@@ -46,7 +46,8 @@ class HITLManager:
                  filename: str, 
                  field_name: str, 
                  ai_value: Any, 
-                 confidence: float, 
+                 signal: str = "unknown",
+                 reason: str = "",
                  page_num: int = 1,
                  bbox: Optional[List[float]] = None,
                  context_image: Optional[str] = None) -> str:
@@ -64,14 +65,15 @@ class HITLManager:
             "page_num": page_num,
             "field_name": field_name,
             "ai_value": ai_value,
-            "confidence": round(confidence, 3),
+            "signal": signal,
+            "reason": reason,
             "bbox": bbox,
             "context_image": context_image  # Base64 string of the region
         }
         
         self.queue.append(item)
         self._save_queue()
-        logger.info(f"Added item {item_id} to review queue (Conf: {confidence})")
+        logger.info(f"Added item {item_id} to review queue (signal: {signal})")
         return item_id
         
     def get_pending_items(self) -> List[Dict]:

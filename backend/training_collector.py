@@ -38,7 +38,7 @@ class TrainingDataCollector:
     - All fields requested for this extraction
     - The complete extraction result (with corrections merged = ground truth)
     - What was corrected (original vs corrected value)
-    - Confidence scores, model info, voting rounds
+    - Review signals, model info, voting rounds
 
     Multipage-ready: page_num is tracked per sample with unique image naming.
     """
@@ -91,7 +91,7 @@ class TrainingDataCollector:
         fields_requested: List[str],
         extraction_results: Dict[str, str],
         corrections: Dict[str, Dict[str, str]],
-        confidences: Dict[str, float],
+        signals: Dict[str, dict],
         model_used: str = "qwen",
         voting_rounds: int = 1,
     ) -> str:
@@ -108,7 +108,7 @@ class TrainingDataCollector:
             corrections: Dict of corrections made, e.g.
                          {"Patient Name": {"original": "LENOORE", "corrected": "LENORE"}}
                          Empty dict if all values were approved
-            confidences: Dict of {field: confidence_score}
+            signals: Dict of {field: signal_dict}
             model_used: "qwen" or "paddleocr"
             voting_rounds: Number of voting rounds used
 
@@ -141,7 +141,7 @@ class TrainingDataCollector:
             "voting_rounds": voting_rounds,
             "extraction_results": extraction_results,
             "corrections": corrections,
-            "confidences": {k: round(v, 4) for k, v in confidences.items()},
+            "signals": signals,
             "is_corrected": len(corrections) > 0,
         }
 

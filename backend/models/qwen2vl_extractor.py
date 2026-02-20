@@ -78,12 +78,37 @@ def get_qwen2vl_model():
         )
         print(f"   📐 Processor pixel budget: {QWEN2VL_MIN_PIXELS:,} – {QWEN2VL_MAX_PIXELS:,} pixels")
         
-        _qwen2vl_model = ModelClass.from_pretrained(
-            model_name,
-            quantization_config=quantization_config if device == "cuda" else None,
-            device_map="auto",
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        )
+        # Suppress the 1600+ line "Loading weights" progress bar from accelerate
+        # In Docker (non-TTY), tqdm dumps every frame as a separate line.
+        # We must monkey-patch tqdm itself since TQDM_DISABLE doesn't work here.
+        import tqdm as _tqdm_mod
+        import tqdm.auto as _tqdm_auto
+        import logging as _logging
+        _orig_tqdm = _tqdm_mod.tqdm
+        _orig_auto_tqdm = _tqdm_auto.tqdm
+        
+        class _SilentTqdm(_orig_tqdm):
+            def __init__(self, *args, **kwargs):
+                kwargs['disable'] = True
+                super().__init__(*args, **kwargs)
+        
+        _tqdm_mod.tqdm = _SilentTqdm
+        _tqdm_auto.tqdm = _SilentTqdm
+        _accel_logger = _logging.getLogger("accelerate")
+        _prev_accel_level = _accel_logger.level
+        _accel_logger.setLevel(_logging.ERROR)
+        
+        try:
+            _qwen2vl_model = ModelClass.from_pretrained(
+                model_name,
+                quantization_config=quantization_config if device == "cuda" else None,
+                device_map="auto",
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            )
+        finally:
+            _tqdm_mod.tqdm = _orig_tqdm
+            _tqdm_auto.tqdm = _orig_auto_tqdm
+            _accel_logger.setLevel(_prev_accel_level)
         _qwen2vl_model.eval()
         
         if torch.cuda.is_available():
@@ -174,8 +199,8 @@ class Qwen2VLExtractor:
     def __init__(self):
         self.model, self.processor = get_qwen2vl_model()
         self.device = next(self.model.parameters()).device
-        self._last_confidences = {}
-        self._last_meta = {}  # stores confidence + validation per field
+        self._last_signals = {}  # stores {source, flags} per field
+        self._last_meta = {}  # stores signals + validation per field
     
     # ─── Smart Batching Helpers ─────────────────────────────────────────────
     
@@ -332,7 +357,7 @@ class Qwen2VLExtractor:
         print(f"   📐 Image: {w}x{h} ({w*h:,} pixels) — processor handles resize")
         
         all_results = {}
-        self._last_confidences = {}
+        self._last_signals = {}
         
         # Clear VRAM fragmentation before inference
         if torch.cuda.is_available():
@@ -371,18 +396,27 @@ class Qwen2VLExtractor:
                     counter = Counter(non_empty)
                     winner, count = counter.most_common(1)[0]
                     all_results[field] = winner
-                    # Confidence based on agreement: 3/3 = 0.90, 2/3 = 0.80, 1/3 = 0.70
-                    agreement = count / voting_rounds
-                    self._last_confidences[field] = round(0.60 + (agreement * 0.30), 2)
+                    # Track voting signal
+                    self._last_signals[field] = {
+                        "source": "voting",
+                        "flags": [],
+                        "detail": f"{count}/{voting_rounds} rounds agreed",
+                    }
                     
                     if len(counter) > 1:
                         voting_disagreed.add(field)
+                        self._last_signals[field]["flags"].append("voting_disagreed")
+                        self._last_signals[field]["detail"] = f"{dict(counter)} → winner: '{winner}' ({count}/{voting_rounds})"
                         print(f"      🗳️ '{field}': {dict(counter)} → winner: '{winner}' ({count}/{voting_rounds})")
                     else:
                         print(f"      ✅ '{field}' = '{winner}' (unanimous {count}/{voting_rounds})")
                 else:
                     all_results[field] = ""
-                    self._last_confidences[field] = 0.0
+                    self._last_signals[field] = {
+                        "source": "voting",
+                        "flags": ["empty_value"],
+                        "detail": "all rounds returned empty",
+                    }
                     print(f"      ❌ '{field}' = '' (all rounds empty)")
             
             # ── Step 1b: Zoom verification for disagreed fields ONLY ──
@@ -402,7 +436,7 @@ class Qwen2VLExtractor:
                         if v:
                             candidates[v.lower()] = v
                     
-                    zoom_value, zoom_conf = self._zoom_extract_field(image, field)
+                    zoom_value = self._zoom_extract_field(image, field)
                     
                     if zoom_value:
                         # Case-insensitive match against voting candidates
@@ -410,12 +444,12 @@ class Qwen2VLExtractor:
                         if matched_candidate is not None:
                             # Zoomed result matches a voting candidate — use it
                             all_results[field] = matched_candidate
-                            self._last_confidences[field] = max(zoom_conf, self._last_confidences[field])
+                            self._last_signals[field]["detail"] += f" → zoom overrode to '{matched_candidate}'"
                             if matched_candidate != voting_winner:
                                 print(f"      🔍 Zoom overrides: '{field}' = '{voting_winner}' → '{matched_candidate}'")
                             else:
                                 print(f"      ✅ Zoom confirms: '{field}' = '{zoom_value}'")
-                                self._last_confidences[field] = min(self._last_confidences[field] + 0.05, 0.95)
+                                self._last_signals[field]["detail"] += " → zoom confirmed"
                         else:
                             # Zoomed result is a NEW value not seen in voting — keep voting winner
                             print(f"      ⚠️ Zoom got new value '{zoom_value}' for '{field}', keeping voting winner '{voting_winner}'")
@@ -429,8 +463,11 @@ class Qwen2VLExtractor:
             for field in fields:
                 value = batch_results.get(field, "")
                 all_results[field] = value
-                # Heuristic confidence for batch: non-empty = 0.75, empty = 0.0
-                self._last_confidences[field] = 0.75 if value.strip() else 0.0
+                self._last_signals[field] = {
+                    "source": "batch",
+                    "flags": [] if value.strip() else ["empty_value"],
+                    "detail": "batch extraction" if value.strip() else "batch returned empty",
+                }
         
         # Show results
         batch_empty = [f for f in fields if not all_results[f].strip()]
@@ -446,26 +483,28 @@ class Qwen2VLExtractor:
             
             for i, field in enumerate(batch_empty):
                 print(f"   [{i+1}/{len(batch_empty)}] Re-extracting: '{field}'")
-                value, confidence = self._extract_single_field(image, field)
+                value = self._extract_single_field(image, field)
                 
                 # Hallucination guard
                 if value and not self._validate_answer(value):
                     logger.warning(f"Hallucination guard: '{field}' answer rejected ({len(value)} chars)")
                     print(f"      🚫 Hallucination guard — clearing")
                     value = ""
-                    confidence = 0.0
                 
                 # Sanitize placeholders
                 if value.strip() in _PLACEHOLDER_VALUES:
                     print(f"      ⚠️ Placeholder '{value}' sanitized to empty")
                     value = ""
-                    confidence = 0.0
                 
                 # Replace batch result if per-field found something
                 if value.strip():
                     all_results[field] = value
-                    self._last_confidences[field] = confidence
-                    print(f"      ✅ Per-field recovered: '{field}' = '{value}' (conf: {confidence:.3f})")
+                    self._last_signals[field] = {
+                        "source": "fallback",
+                        "flags": ["fallback_recovery"],
+                        "detail": f"batch missed, recovered by per-field extraction",
+                    }
+                    print(f"      ✅ Per-field recovered: '{field}' = '{value}'")
                 else:
                     print(f"      ❌ Per-field also empty for '{field}'")
         else:
@@ -489,7 +528,7 @@ class Qwen2VLExtractor:
         
         # Store metadata for server.py HITL routing
         self._last_meta = {
-            "confidences": dict(self._last_confidences),
+            "signals": dict(self._last_signals),
             "validation": validation_results,
         }
         
@@ -595,7 +634,7 @@ class Qwen2VLExtractor:
     
     def _extract_single_field(
         self, image: Image.Image, field: str
-    ) -> Tuple[str, float]:
+    ) -> str:
         """
         Extract a single field value from a document image.
         
@@ -664,13 +703,11 @@ class Qwen2VLExtractor:
                     do_sample=True,
                     temperature=0.1,               # Near-deterministic
                     top_p=0.9,
-                    output_scores=True,            # For confidence computation
-                    return_dict_in_generate=True,
                 )
             
             # Decode text — strip input tokens from output
             input_len = inputs["input_ids"].shape[1]
-            output_ids = outputs.sequences[:, input_len:]
+            output_ids = outputs[:, input_len:]
             
             output_text = self.processor.batch_decode(
                 output_ids,
@@ -678,26 +715,23 @@ class Qwen2VLExtractor:
                 clean_up_tokenization_spaces=False,
             )[0].strip()
             
-            # Compute per-field confidence from token probabilities
-            confidence = self._compute_confidence(outputs, input_len)
-            
             # Handle NOT_FOUND and empty responses
             if not output_text or output_text.upper() in ("NOT_FOUND", "NOT FOUND", "N/A", "NONE"):
-                return "", 0.0
+                return ""
             
             # Clean up: remove surrounding quotes if model wrapped the value
             value = output_text.strip().strip('"').strip("'").strip()
             
-            return value, confidence
+            return value
             
         except Exception as e:
             logger.error(f"Single-field extraction failed for '{field}': {e}")
             print(f"      ❌ Error: {e}")
-            return "", 0.0
+            return ""
     
     def _zoom_extract_field(
         self, image: Image.Image, field: str
-    ) -> Tuple[str, float]:
+    ) -> str:
         """
         Multi-crop zoom extraction for a single field.
         
@@ -708,7 +742,7 @@ class Qwen2VLExtractor:
         Only one half will contain the field — returns that result.
         
         Returns:
-            Tuple of (value: str, confidence: float)
+            str: extracted value, or "" if not found
         """
         w, h = image.size
         overlap = int(h * 0.10)  # 10% overlap to avoid splitting a field
@@ -719,80 +753,27 @@ class Qwen2VLExtractor:
         bottom_crop = image.crop((0, h // 2 - overlap, w, h))
         
         crops = [("top", top_crop), ("bottom", bottom_crop)]
-        best_value = ""
-        best_conf = 0.0
         
         for crop_name, crop_img in crops:
-            value, conf = self._extract_single_field(crop_img, field)
+            value = self._extract_single_field(crop_img, field)
             
             # Hallucination guard
             if value and not self._validate_answer(value):
                 value = ""
-                conf = 0.0
             
             # Sanitize placeholders
             if value.strip() in _PLACEHOLDER_VALUES:
                 value = ""
-                conf = 0.0
             
-            if value.strip() and conf > best_conf:
-                best_value = value
-                best_conf = conf
-                print(f"      🔍 Zoom ({crop_name}): '{field}' = '{value}' (conf: {conf:.3f})")
+            if value.strip():
+                print(f"      🔍 Zoom ({crop_name}): '{field}' = '{value}'")
+                return value
         
-        return best_value, best_conf
+        return ""
     
-    def _compute_confidence(self, outputs, input_len: int) -> float:
-        """
-        Compute real per-field confidence from generation token probabilities.
-        
-        With per-field plain-text output, ALL generated tokens are value tokens
-        (no JSON structure to dilute the signal). This gives accurate confidence.
-        
-        Method:
-            1. compute_transition_scores → per-token log-probs
-            2. Mean log-prob across all generated tokens
-            3. Exponentiate to get confidence ∈ (0, 1]
-            4. Low-token penalty: if any token has prob < 0.3, cap at 0.7
-        
-        Returns:
-            float confidence in [0.0, 1.0]
-        """
-        try:
-            if not hasattr(outputs, 'scores') or not outputs.scores:
-                logger.warning("No scores in output — falling back to 0.50")
-                return 0.50
-            
-            transition_scores = self.model.compute_transition_scores(
-                outputs.sequences, outputs.scores, normalize_logits=True
-            )
-            
-            log_probs = transition_scores[0]  # first (only) batch element
-            
-            if len(log_probs) == 0:
-                return 0.50
-            
-            log_probs_float = log_probs.float().cpu()
-            avg_log_prob = log_probs_float.mean().item()
-            
-            # Exponentiate to get confidence ∈ (0, 1]
-            confidence = math.exp(avg_log_prob)
-            confidence = round(min(1.0, max(0.0, confidence)), 3)
-            
-            # Low-token penalty: if any individual token probability < 0.3,
-            # the model was likely guessing on that token → cap overall confidence
-            token_probs = torch.exp(log_probs_float)
-            min_token_prob = token_probs.min().item()
-            if min_token_prob < 0.3 and confidence > 0.7:
-                confidence = min(confidence, 0.7)
-                print(f"      ⚠️ Low-token penalty: min token prob {min_token_prob:.3f} → capped at {confidence:.3f}")
-            
-            print(f"      🎯 Confidence: {confidence:.3f} (avg log-prob: {avg_log_prob:.4f}, {len(log_probs)} tokens, min_prob: {min_token_prob:.3f})")
-            return confidence
-            
-        except Exception as e:
-            logger.warning(f"Confidence computation failed ({e}) — falling back to 0.50")
-            return 0.50
+    # _compute_confidence removed — Review Signal System replaces numeric confidence
+    # with source/flags-based review signals (see _last_signals)
+    
     
     def _validate_answer(self, value: str) -> bool:
         """
@@ -945,12 +926,10 @@ class Qwen2VLExtractor:
                     do_sample=True,
                     temperature=0.1,
                     top_p=0.9,
-                    output_scores=True,
-                    return_dict_in_generate=True,
                 )
             
             input_len = inputs["input_ids"].shape[1]
-            output_ids = outputs.sequences[:, input_len:]
+            output_ids = outputs[:, input_len:]
             
             output_text = self.processor.batch_decode(
                 output_ids,
@@ -960,11 +939,8 @@ class Qwen2VLExtractor:
             
             print(f"   📋 Checkbox raw output: {output_text[:500]}")
             
-            # Compute overall confidence
-            overall_conf = self._compute_confidence(outputs, input_len)
-            
-            # Parse the JSON array
-            checkboxes = self._parse_checkbox_list(output_text, overall_conf)
+            # Parse the JSON array (no confidence needed)
+            checkboxes = self._parse_checkbox_list(output_text)
             
             print(f"   📊 Found {len(checkboxes)} checkboxes")
             
@@ -975,24 +951,13 @@ class Qwen2VLExtractor:
                 if checkboxes:
                     print(f"   📊 Fallback found {len(checkboxes)} checkboxes")
             
-            # Zoom-verify low-confidence checkboxes
-            verified = []
+            # Log all checkbox results
             for cb in checkboxes:
-                if cb["confidence"] < 0.7:
-                    print(f"   🔬 Zoom verifying '{cb['label']}' (conf: {cb['confidence']:.2f})...")
-                    zoom_checked, zoom_conf = self._verify_checkbox_zoom(
-                        image, cb["label"]
-                    )
-                    if zoom_conf > cb["confidence"]:
-                        cb["checked"] = zoom_checked
-                        cb["confidence"] = round(zoom_conf, 3)
-                        print(f"   ✅ Zoom improved: '{cb['label']}' = {'Checked' if zoom_checked else 'Unchecked'} (conf: {zoom_conf:.2f})")
-                
                 status = "Checked" if cb["checked"] else "Unchecked"
-                print(f"   {'☑' if cb['checked'] else '☐'} '{cb['label']}' = {status} (conf: {cb['confidence']:.2f})")
-                verified.append(cb)
+                source = cb.get("signal", {}).get("source", "batch")
+                print(f"   {'☑' if cb['checked'] else '☐'} '{cb['label']}' = {status} [{source}]")
             
-            return verified
+            return checkboxes
             
         except Exception as e:
             logger.error(f"Checkbox detection failed: {e}")
@@ -1160,12 +1125,10 @@ class Qwen2VLExtractor:
                     do_sample=True,
                     temperature=0.1,
                     top_p=0.9,
-                    output_scores=True,
-                    return_dict_in_generate=True,
                 )
             
             input_len = inputs["input_ids"].shape[1]
-            output_ids = outputs.sequences[:, input_len:]
+            output_ids = outputs[:, input_len:]
             
             output_text = self.processor.batch_decode(
                 output_ids,
@@ -1173,21 +1136,19 @@ class Qwen2VLExtractor:
                 clean_up_tokenization_spaces=False,
             )[0].strip().lower()
             
-            confidence = self._compute_confidence(outputs, input_len)
-            
             # Parse response
             checked = "check" in output_text and "uncheck" not in output_text
             
-            return checked, confidence
+            return checked
             
         except Exception as e:
             logger.error(f"Single checkbox extraction failed for '{field}': {e}")
             print(f"      ❌ Checkbox error for '{field}': {e}")
-            return False, 0.0
+            return False
     
     def _verify_checkbox_zoom(
         self, image: Image.Image, label: str
-    ) -> Tuple[bool, float]:
+    ) -> bool:
         """
         Zoom verification for a single checkbox.
         
@@ -1195,7 +1156,7 @@ class Qwen2VLExtractor:
         the checkbox at higher effective resolution.
         
         Returns:
-            Tuple of (checked: bool, confidence: float)
+            bool: whether checkbox is checked
         """
         w, h = image.size
         overlap = int(h * 0.10)
@@ -1206,27 +1167,24 @@ class Qwen2VLExtractor:
         bottom_crop = image.crop((0, h // 2 - overlap, w, h))
         
         crops = [("top", top_crop), ("bottom", bottom_crop)]
-        best_checked = False
-        best_conf = 0.0
+        results = []
         
         for crop_name, crop_img in crops:
-            checked, conf = self._extract_single_checkbox(crop_img, label)
-            
-            if conf > best_conf:
-                best_checked = checked
-                best_conf = conf
-                print(f"      🔍 Zoom ({crop_name}): '{label}' = {'Checked' if checked else 'Unchecked'} (conf: {conf:.3f})")
+            checked = self._extract_single_checkbox(crop_img, label)
+            results.append(checked)
+            print(f"      🔍 Zoom ({crop_name}): '{label}' = {'Checked' if checked else 'Unchecked'}")
         
-        return best_checked, best_conf
+        # Return majority result
+        return sum(results) > len(results) / 2
     
-    def _parse_checkbox_list(self, output_text: str, default_conf: float = 0.5) -> List[dict]:
+    def _parse_checkbox_list(self, output_text: str) -> List[dict]:
         """
         Parse a JSON array of checkbox results from model output.
         
         Handles markdown code blocks, partial JSON, etc.
         
         Returns:
-            List of {"label": str, "checked": bool, "confidence": float}
+            List of {"label": str, "checked": bool, "signal": dict}
         """
         parsed = None
         
@@ -1264,12 +1222,14 @@ class Qwen2VLExtractor:
             if isinstance(item, dict) and "label" in item:
                 label = str(item["label"]).strip()
                 checked = bool(item.get("checked", False))
-                conf = float(item.get("confidence", default_conf))
                 if label:
                     results.append({
                         "label": label,
                         "checked": checked,
-                        "confidence": round(conf, 3),
+                        "signal": {
+                            "source": "checkbox_batch",
+                            "flags": [],
+                        },
                     })
         
         return results
@@ -1333,12 +1293,12 @@ class Qwen2VLExtractor:
         
         return validation_results
     
-    def get_last_confidences(self) -> Dict[str, float]:
-        """Return confidence scores from the last extraction."""
-        return self._last_confidences
+    def get_last_signals(self) -> Dict[str, dict]:
+        """Return review signals from the last extraction."""
+        return self._last_signals
     
     def get_last_meta(self) -> dict:
-        """Return full metadata (confidence + validation) from last extraction."""
+        """Return full metadata (signals + validation) from last extraction."""
         return self._last_meta
     
     def auto_detect_fields(self, image: Image.Image) -> List[str]:

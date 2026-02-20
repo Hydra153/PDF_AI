@@ -92,7 +92,7 @@ _extraction_context = {
     "page_num": 1,
     "fields_requested": [],
     "results": {},
-    "confidences": {},
+    "signals": {},
     "model_used": "qwen",
     "voting_rounds": 1,
 }
@@ -105,7 +105,7 @@ _gpu_semaphore = asyncio.Semaphore(1)
 _GPU_TIMEOUT_SECONDS = 300  # Max wait time — PaddleOCR-VL first load can take ~60-120s
 
 def save_extraction_context(image, filename, page_num=1, fields=None, results=None,
-                           confidences=None, model_used="qwen", voting_rounds=1):
+                           signals=None, model_used="qwen", voting_rounds=1):
     """Save complete extraction context for training data collection."""
     global _extraction_context
     _extraction_context = {
@@ -114,7 +114,7 @@ def save_extraction_context(image, filename, page_num=1, fields=None, results=No
         "page_num": page_num,
         "fields_requested": fields or [],
         "results": dict(results) if results else {},
-        "confidences": dict(confidences) if confidences else {},
+        "signals": dict(signals) if signals else {},
         "model_used": model_used,
         "voting_rounds": voting_rounds,
     }
@@ -142,7 +142,8 @@ class FlagRequest(BaseModel):
     filename: str
     field_name: str
     ai_value: str
-    confidence: float = 0.5
+    signal: str = "manual_flag"
+    reason: str = "Manually flagged for review"
 
 
 # ─── Core Endpoints ───
@@ -254,7 +255,7 @@ async def extract_fields(
                     if model == "paddleocr":
                         extractor = PaddleOCRExtractor()
                         results = extractor.extract(image, [], [], field_labels)
-                        model_confidences = extractor.get_last_confidences()
+                        model_signals = extractor.get_last_signals()
                         extraction_meta = extractor.get_last_meta()
                     else:
                         extractor = Qwen2VLExtractor()
@@ -263,7 +264,7 @@ async def extract_fields(
                             ocr_source="none",
                             voting_rounds=voting_rounds,
                         )
-                        model_confidences = extractor.get_last_confidences()
+                        model_signals = extractor.get_last_signals()
                         extraction_meta = extractor.get_last_meta()
                     
                     # ─── Auto-detect checkbox fields (only when checkbox mode enabled) ───
@@ -315,20 +316,27 @@ async def extract_fields(
                                 if not matched:
                                     print(f"      🔍 '{field_name}' not in batch — trying single-item VQA...")
                                     try:
-                                        is_checked, conf = qwen._extract_single_checkbox(raw_image, field_name)
-                                        matched = {"label": field_name, "checked": is_checked, "confidence": conf}
-                                        print(f"      {'☑' if is_checked else '☐'} Single-item: '{field_name}' → {'Checked' if is_checked else 'Unchecked'} (conf: {conf:.2f})")
+                                        is_checked = qwen._extract_single_checkbox(raw_image, field_name)
+                                        matched = {
+                                            "label": field_name,
+                                            "checked": is_checked,
+                                            "signal": {
+                                                "source": "checkbox_vqa",
+                                                "flags": ["vqa_fallback"],
+                                            },
+                                        }
+                                        print(f"      {'☑' if is_checked else '☐'} Single-item: '{field_name}' → {'Checked' if is_checked else 'Unchecked'}")
                                     except Exception as e:
                                         print(f"      ⚠️ Single-item fallback failed for '{field_name}': {e}")
                                 
                                 if matched:
                                     status_str = "Checked" if matched["checked"] else "Unchecked"
                                     results[field_name] = status_str
-                                    model_confidences[field_name] = matched["confidence"]
-                                    print(f"      {'☑' if matched['checked'] else '☐'} '{field_name}' → {status_str} (conf: {matched['confidence']:.2f})")
+                                    model_signals[field_name] = matched.get("signal", {"source": "checkbox_batch", "flags": []})
+                                    print(f"      {'☑' if matched['checked'] else '☐'} '{field_name}' → {status_str} [{model_signals[field_name].get('source', 'batch')}]")
                                 else:
                                     results[field_name] = "Not Found"
-                                    model_confidences[field_name] = 0.0
+                                    model_signals[field_name] = {"source": "checkbox_batch", "flags": ["not_found"]}
                                     print(f"      ❓ '{field_name}' → No matching checkbox found")
                     
                     _active_model = model
@@ -350,17 +358,15 @@ async def extract_fields(
             page_num=1,
             fields=field_labels,
             results=results,
-            confidences=model_confidences,
+            signals=model_signals,
             model_used=model,
             voting_rounds=voting_rounds,
         )
 
-        # ─── Confidence + Validation-based HITL routing ───
-        # FIX 1: Use REAL token-level confidence from extractor
-        # FIX 2: Also flag fields that fail validation
-        CONFIDENCE_THRESHOLD = 0.7
+        # ─── Signal-based HITL routing ───
+        # Any field with flags gets routed for human review
         hitl_manager = get_hitl_manager()
-        low_confidence_fields = []
+        flagged_fields = []
         validation_errors = {}
         
         # Get validation metadata from extractor
@@ -368,27 +374,48 @@ async def extract_fields(
         validation = meta.get("validation", {})
         
         for field_name, value in results.items():
-            actual_conf = model_confidences.get(field_name, 0.50)
+            field_signal = model_signals.get(field_name, {"source": "unknown", "flags": []})
             v_result = validation.get(field_name, {})
             
-            # Flag if low confidence OR validation failed
-            should_flag = actual_conf < CONFIDENCE_THRESHOLD
+            # Collect flags from both extraction signals and validation
+            flags = list(field_signal.get("flags", []))
+            reason_parts = []
+            
             if v_result.get("is_valid") is False and v_result.get("error") != "Empty value":
-                should_flag = True
+                flags.append("validation_error")
                 validation_errors[field_name] = v_result.get("error", "Unknown")
+                reason_parts.append(f"Validation: {v_result.get('error', 'Unknown')}")
+            
+            if not value.strip():
+                if "empty_value" not in flags:
+                    flags.append("empty_value")
+                reason_parts.append("Empty value")
+            
+            # Add source-specific reasons
+            source = field_signal.get("source", "unknown")
+            if "fallback_recovery" in flags:
+                reason_parts.append("Recovered by per-field fallback (batch missed)")
+            if "voting_disagreed" in flags:
+                reason_parts.append(f"Voting disagreement: {field_signal.get('detail', '')}")
+            if "vqa_fallback" in flags:
+                reason_parts.append("Detected via single-item VQA fallback")
+            if "not_found" in flags:
+                reason_parts.append("No matching checkbox found")
+            
+            # Flag if any flags exist (excluding empty_value for non-required fields)
+            should_flag = bool(flags)
             
             if should_flag:
+                reason = "; ".join(reason_parts) if reason_parts else f"Source: {source}"
                 hitl_manager.add_item(
                     filename=file.filename,
                     field_name=field_name,
                     ai_value=value,
-                    confidence=actual_conf,
+                    signal=source,
+                    reason=reason,
                     page_num=1
                 )
-                low_confidence_fields.append(field_name)
-                reason = f"conf: {actual_conf:.2f}"
-                if field_name in validation_errors:
-                    reason += f", validation: {validation_errors[field_name]}"
+                flagged_fields.append(field_name)
                 print(f"⚠️ Auto-flagged '{field_name}' for review ({reason})")
 
         # Build normalized_values map from validation metadata
@@ -404,8 +431,9 @@ async def extract_fields(
             "_meta": {
                 "extraction_model": model,
                 "time_seconds": round(t_elapsed, 1),
-                "low_confidence_fields": low_confidence_fields,
-                "auto_flagged_count": len(low_confidence_fields),
+                "signals": {k: {"source": v.get("source", "unknown"), "flags": v.get("flags", [])} for k, v in model_signals.items()},
+                "flagged_fields": flagged_fields,
+                "auto_flagged_count": len(flagged_fields),
                 "validation_errors": validation_errors,
                 "normalized_values": normalized_values,
             }
@@ -415,7 +443,7 @@ async def extract_fields(
             success=True,
             data=response_data,
             message=f"Extracted {len(results)} fields in {t_elapsed:.1f}s" + 
-                    (f" ({len(low_confidence_fields)} flagged for review)" if low_confidence_fields else "")
+                    (f" ({len(flagged_fields)} flagged for review)" if flagged_fields else "")
         )
         
     except HTTPException:
@@ -587,7 +615,7 @@ async def resolve_review(item_id: str, decision: ReviewDecision):
                     fields_requested=context["fields_requested"],
                     extraction_results=ground_truth,
                     corrections=corrections,
-                    confidences=context["confidences"],
+                    signals=context.get("signals", {}),
                     model_used=context["model_used"],
                     voting_rounds=context["voting_rounds"],
                 )
@@ -606,7 +634,8 @@ async def flag_for_review(request: FlagRequest):
         filename=request.filename,
         field_name=request.field_name,
         ai_value=request.ai_value,
-        confidence=request.confidence,
+        signal=request.signal,
+        reason=request.reason,
         context_image=None
     )
     return {"success": True, "item_id": item_id}

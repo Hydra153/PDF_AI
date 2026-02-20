@@ -112,7 +112,7 @@ export async function autoFindFields(file) {
 /**
  * Detect all physical checkboxes in a PDF
  * @param {File} file - PDF file
- * @returns {Object} {checkboxes: [{label, checked, confidence}], count, time_seconds}
+ * @returns {Object} {checkboxes: [{label, checked, signal}], count, time_seconds}
  */
 export async function detectCheckboxes(file) {
   try {

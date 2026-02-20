@@ -728,14 +728,15 @@ function renderApp() {
       const icon = cb.checked ? "☑" : "☐";
       const statusText = cb.checked ? "Checked" : "Unchecked";
       const statusColor = cb.checked ? "#22c55e" : "#94a3b8";
-      const confPercent = Math.round(cb.confidence * 100);
-      const confColor = confPercent >= 70 ? "#22c55e" : confPercent >= 40 ? "#f59e0b" : "#ef4444";
+      const cbSignal = cb.signal || {};
+      const cbSource = cbSignal.source || "batch";
+      const sourceIcon = cbSource === "checkbox_vqa" ? "🔍" : "📋";
 
       html += `
         <div class="result-card animate-fadeUp cb-card" data-cb-index="${i}" data-cb-checked="${cb.checked}" style="animation-delay: ${i * 0.03}s; cursor: pointer;" title="Click to toggle">
           <div class="card-header">
             <span class="field-name">${cb.label}</span>
-            <span class="conf-badge" style="background: ${confColor}20; color: ${confColor};">${confPercent}%</span>
+            <span class="signal-badge">${sourceIcon} ${cbSource}</span>
           </div>
           <div class="field-value" style="display: flex; align-items: center; gap: 8px;">
             <span class="cb-icon" style="font-size: 1.4rem; color: ${statusColor};">${icon}</span>
@@ -812,7 +813,6 @@ function renderApp() {
     const getExportData = () => lastCheckboxResults.map(c => ({
       label: c.label,
       checked: c.checked,
-      confidence: c.confidence,
     }));
 
     // Copy JSON
@@ -985,7 +985,7 @@ function renderApp() {
   // Current extraction data (for JSON display)
   let currentExtractionData = {};
 
-  function renderResults(container, data, confidences = {}) {
+  function renderResults(container, data) {
     currentExtractionData = { ...data };
 
     if (!data || Object.keys(data).length === 0) {
@@ -998,10 +998,11 @@ function renderApp() {
       return;
     }
 
-    // Extract _meta for confidences and normalized values
+    // Extract _meta for signals and normalized values
     const meta = data._meta || {};
     const normalizedValues = meta.normalized_values || {};
-    const metaConfidences = meta.confidences || confidences;
+    const metaSignals = meta.signals || {};
+    const flaggedFields = meta.flagged_fields || [];
     const hasNormalized = Object.keys(normalizedValues).length > 0;
 
     // Track format state
@@ -1030,19 +1031,30 @@ function renderApp() {
 
       const displayValue = value && value !== "None" ? value : "—";
       const safeValue = value && value !== "None" ? value : "";
-      // Use confidence from _meta if available
-      const conf = metaConfidences[key] || confidences[key];
-      const hasConf = conf !== undefined && conf !== null;
-      const confPercent = hasConf ? Math.round(conf * 100) : null;
-      const confColor =
-        confPercent >= 70
-          ? "#22c55e"
-          : confPercent >= 40
-            ? "#f59e0b"
-            : "#ef4444";
-      const confDisplay = hasConf
-        ? `<span class="conf-badge" style="background: ${confColor}20; color: ${confColor};">${confPercent}%</span>`
-        : "";
+      
+      // Build signal display
+      const fieldSignal = metaSignals[key] || {};
+      const source = fieldSignal.source || "";
+      const flags = fieldSignal.flags || [];
+      const isFlagged = flaggedFields.includes(key);
+      
+      // Source badge icon mapping
+      const sourceIcons = {
+        batch: "⚡", fallback: "🔍", voting: "🗳️", paddleocr: "📄",
+        checkbox_batch: "☑", checkbox_vqa: "🔍", unknown: "❓",
+      };
+      const sourceIcon = sourceIcons[source] || "";
+      const sourceBadge = source ? `<span class="signal-badge">${sourceIcon} ${source}</span>` : "";
+      
+      // Flag pills
+      const flagPills = flags.map(f => {
+        const flagIcons = {
+          empty_value: "⭕", fallback_recovery: "🔄", voting_disagreed: "⚖️",
+          validation_error: "❌", vqa_fallback: "🔍", not_found: "❓",
+          fuzzy_match: "≈",
+        };
+        return `<span class="flag-pill">${flagIcons[f] || "⚠"} ${f.replace(/_/g, " ")}</span>`;
+      }).join("");
 
       // Check if this field has a different normalized value
       const normalizedVal = normalizedValues[key];
@@ -1052,14 +1064,15 @@ function renderApp() {
         : "";
 
       html += `
-        <div class="result-card animate-fadeUp" data-field="${key}" data-raw="${safeValue}" data-normalized="${hasFormat ? normalizedVal : safeValue}" style="animation-delay: ${idx * 0.03}s;">
+        <div class="result-card animate-fadeUp${isFlagged ? ' flagged' : ''}" data-field="${key}" data-raw="${safeValue}" data-normalized="${hasFormat ? normalizedVal : safeValue}" style="animation-delay: ${idx * 0.03}s;">
           <div class="card-header">
             <span class="field-name">${key}${formatIndicator}</span>
-            ${confDisplay}
+            ${sourceBadge}
           </div>
+          ${flagPills ? `<div class="flag-pills">${flagPills}</div>` : ""}
           <div class="field-value">${displayValue}</div>
           <div class="card-footer">
-            <button class="btn-icon btn-flag" data-field="${key}" data-value="${safeValue}" data-conf="${conf || 0.5}" title="Flag for review">${icons.alertCircle(14)}</button>
+            <button class="btn-icon btn-flag" data-field="${key}" data-value="${safeValue}" data-signal="${source || 'manual_flag'}" title="Flag for review">${icons.alertCircle(14)}</button>
             <button class="btn-icon btn-delete-result" data-field="${key}" title="Remove">✕</button>
           </div>
         </div>
@@ -1143,7 +1156,7 @@ function renderApp() {
       btn.addEventListener("click", async () => {
         const fieldName = btn.dataset.field;
         const aiValue = btn.dataset.value;
-        const conf = parseFloat(btn.dataset.conf) || 0.5;
+        const signal = btn.dataset.signal || "manual_flag";
         const filename = selectedFile ? selectedFile.name : "unknown.pdf";
 
         try {
@@ -1155,7 +1168,8 @@ function renderApp() {
               filename,
               field_name: fieldName,
               ai_value: aiValue,
-              confidence: conf,
+              signal: signal,
+              reason: "Manually flagged for review",
             }),
           });
           if (res.ok) {
