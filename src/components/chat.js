@@ -20,6 +20,23 @@ export function createChat(containerEl) {
   let _isOpen = false;
   let _isLoading = false;
 
+  // Predefined answers for general/non-document questions
+  const _predefined = {
+    "hi": "Hello! I'm your Document Q&A assistant. Upload a PDF and ask me anything about its contents.",
+    "hello": "Hi there! I can answer questions about your uploaded document. Try asking about specific fields or values.",
+    "hey": "Hey! Ready to help. Ask me anything about your document.",
+    "who are you": "I'm an AI document assistant powered by Qwen2.5-VL. I analyze uploaded PDFs and answer questions about their content — fields, values, tables, and more.",
+    "what can you do": "I can read and understand PDF documents. Ask me about any text, field, value, or detail in your uploaded document and I'll extract the answer.",
+    "help": "Upload a PDF, then ask questions like:\n• \"What is the invoice total?\"\n• \"Who is the sender?\"\n• \"What is the due date?\"\nI'll read the document and find the answer.",
+    "thank you": "You're welcome! Let me know if you have more questions about the document.",
+    "thanks": "Happy to help! Ask away if you need anything else.",
+  };
+
+  function getPredefinedAnswer(text) {
+    const normalized = text.toLowerCase().replace(/[?!.,]/g, "").trim();
+    return _predefined[normalized] || null;
+  }
+
   // Generate unique IDs for messages
   let _idCounter = 0;
   const _uid = () => `msg-${Date.now()}-${_idCounter++}`;
@@ -48,7 +65,10 @@ export function createChat(containerEl) {
       </div>
     </div>
     <div class="chat-input-bar">
-      <input type="text" class="chat-input" placeholder="Ask a question..." disabled />
+      <div class="chat-input-wrapper">
+        <input type="text" class="chat-input" placeholder="Ask a question..." disabled />
+        <span class="chat-disclaimer">AI can make mistakes. Please verify important information.</span>
+      </div>
       <button class="chat-send-btn" disabled title="Send">${icons.send(16)}</button>
     </div>
   `;
@@ -161,6 +181,31 @@ export function createChat(containerEl) {
     _isLoading = true;
     inputEl.disabled = true;
     sendBtn.disabled = true;
+
+    // Check for predefined answers first
+    const predefined = getPredefinedAnswer(questionText);
+    if (predefined) {
+      _messages.push({ role: "user", text: questionText.trim(), id: _uid() });
+      _messages.push({ role: "ai", text: predefined, id: _uid(), time: 0 });
+      _isLoading = false;
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      renderMessages();
+      inputEl.focus();
+      return;
+    }
+
+    // Need a file for document questions
+    if (!_file) {
+      _messages.push({ role: "user", text: questionText.trim(), id: _uid() });
+      _messages.push({ role: "ai", text: "Please upload a PDF document first, then I can answer questions about its contents.", id: _uid() });
+      _isLoading = false;
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      renderMessages();
+      inputEl.focus();
+      return;
+    }
 
     // Add user message
     const userMsg = { role: "user", text: questionText.trim(), id: _uid() };
