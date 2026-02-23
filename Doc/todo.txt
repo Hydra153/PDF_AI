@@ -1,24 +1,83 @@
--*better image preprocessing
--paddelOCR-VL
--*voting system
--checkbox
--table
--chart
--multi-page support
--better error handling
--better UI
--better UX
--HITL (Human-in-the-loop)
--UI ICONS
-1)questions
+1)Doc QnA (Done)
 2)radio
-3)resend 
+3)resend (Done)
 4)table
 5)UI
 6)Section extraction
+7)Image Support (Done)
+8)Pasted Image/pdf Support (Done)
+9)Layout
+10)chart
+11)Whole autoextract.
+12)Fast first extraction
+13)**Admin panel**
+14)QnA panel UI. 
 
 ref:
 implementation_plan.md
 vlm_accuracy_research.md
 
 
+table:Q: "Extract the table as JSON"
+A:
+[
+  {"Pos": 1, "Description": "IT programming and consulting", "Unit": "hours", "Qty": 86, "Unit Price": 185.00, "Value": 15910.00, "VAT%": 20, "VAT": 3182.00, "Total": 19092.00},
+  {"Pos": 2, "Description": "Support hours", "Unit": "hours", "Qty": 4, "Unit Price": 78.00, "Value": 280.00, "VAT%": 20, "VAT": 56.00, "Total": 336.00},
+  {"Pos": 3, "Description": "Domain sample-company.net", "Unit": "pcs", "Qty": 1, "Unit Price": 120.00, "Value": 120.00, "VAT%": 20, "VAT": 24.00, "Total": 144.00}
+]
+Recommended Implementation Plan (for later)
+Feature	Approach	Difficulty
+Full table → JSON	Single prompt, model returns structured JSON array	Easy
+Column query ("all Qty values")	Prompt: "List all values in the Qty column"	Easy
+Row query ("row 3")	Prompt: "Return all values from row 3 of the table"	Medium
+Cell query ("(1,1)")	Parse JSON result client-side, index into it	Easy (derived)
+Multiple tables	"How many tables? Extract table 2"	Medium
+
+
+Prompt B:
+Look at this document. Imagine you need to enter every piece of information from this document into a database.
+List ALL the field names you would create in the database to store every data point visible in this document.
+
+Return ONLY a JSON array of descriptive field names.
+Example: ["Invoice Number", "Sender Name", "Sender VAT", "Recipient Address", "Total Amount", "IBAN"]
+
+Be thorough — include header info, company details, addresses, contact info, dates, amounts, IDs, and payment details.
+Do not include table column headers or row data. Do not include any explanation.
+
+
+PRompt c:What individual data points can be extracted from this document?
+List each one as a short, descriptive field name.
+
+Return ONLY a JSON array of field names.
+Example: ["Company Name", "Invoice Date", "Total Amount", "Bank IBAN"]
+
+Include everything: names, addresses, phone numbers, emails, dates, amounts, IDs, bank info, references.
+Skip table column headers and checkbox items. Only the JSON array, no explanation.
+
+
+Prompt D:
+You are a document data extraction expert. Examine this document image and identify ALL extractable fields.
+
+Look for these categories:
+1. ENTITIES: Company names, person names, roles
+2. CONTACT: Addresses, phone numbers, emails, websites
+3. IDENTIFIERS: Invoice numbers, VAT numbers, reference numbers, IBANs
+4. DATES: Invoice date, due date, issue dates
+5. FINANCIAL: Amounts, totals, subtotals, tax rates, currency
+6. METADATA: Document type, page numbers, signatures
+
+Return ONLY a flat JSON array of specific field names.
+Example: ["Sender Company", "Sender VAT Number", "Invoice Date", "Subtotal", "IBAN"]
+Use descriptive names (e.g., "Sender Phone" not just "Phone").
+Do not include table column headers. No explanation, only the JSON array.
+
+
+Prompt E:
+Step 1: Identify all distinct sections or blocks in this document (e.g., header, sender info, recipient info, invoice details, payment info, shipping, signatures).
+Step 2: For each section, list every labeled data field.
+
+Return ONLY a flat JSON array of all field names combined.
+Example: ["Sender Company Name", "Sender Address", "Invoice Number", "Due Date", "IBAN", "Bank Name"]
+
+Be exhaustive. Include company info, contact details, IDs, dates, financial amounts, and payment details.
+Do not include table column headers. No explanation, only the JSON array.
