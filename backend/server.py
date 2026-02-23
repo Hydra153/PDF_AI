@@ -2,14 +2,7 @@
 FastAPI Server for PDF Data Extraction
 Provides REST API endpoints for document understanding and field extraction
 
-Extraction engines:
-  - PaddleOCR-VL 1.5 (0.9B params, document parsing + markdown extraction)
-  - Qwen2.5-VL-3B (Vision-Language Model, OCR-free)
-
-VRAM Management:
-  On a 4GB GPU, only one model can be loaded at a time.
-  When switching models via the 'model' parameter, the previous model
-  is unloaded from GPU before the new one loads.
+Extraction engine: Qwen2.5-VL-3B (Vision-Language Model, OCR-free)
 """
 import os
 import time
@@ -50,22 +43,8 @@ try:
 except ImportError as e:
     print(f"❌ {QWEN2VL_DISPLAY_NAME} not available: {e}")
 
-# ─── PaddleOCR-VL Model ───
-_paddleocr_available = False
-try:
-    from models.paddleocr_extractor import PaddleOCRExtractor, unload_paddleocr_pipeline
-    _paddleocr_available = True
-    print(f"✅ PaddleOCR-VL 1.5 available")
-except ImportError as e:
-    print(f"⚠️ PaddleOCR-VL 1.5 not available: {e}")
-
-if not _qwen2vl_available and not _paddleocr_available:
+if not _qwen2vl_available:
     print("⚠️ WARNING: No extraction model available!")
-
-# ─── VRAM Model Swap Tracking ───
-# On 4GB GPU, only one model fits in VRAM at a time.
-# Track which model is currently loaded to swap when needed.
-_active_model = None  # "qwen" or "paddleocr" or None
 
 
 # ─── FastAPI App ───
@@ -229,19 +208,13 @@ async def root():
 @app.get("/api/health")
 async def health_check():
     return {
-        "status": "healthy" if (_qwen2vl_available or _paddleocr_available) else "degraded",
+        "status": "healthy" if _qwen2vl_available else "degraded",
         "models": {
             "qwen": {
                 "name": QWEN2VL_DISPLAY_NAME,
                 "available": _qwen2vl_available,
             },
-            "paddleocr": {
-                "name": "PaddleOCR-VL 1.5",
-                "available": _paddleocr_available,
-            },
         },
-        "active_model": _active_model,
-        # Backward compat
         "model": QWEN2VL_DISPLAY_NAME,
         "model_id": QWEN2VL_MODEL,
         "model_available": _qwen2vl_available,
@@ -252,7 +225,7 @@ async def health_check():
 async def extract_fields(
     file: UploadFile = File(...),
     fields: str = Form(...),
-    model: str = Form("paddleocr"),  # "paddleocr" (default) or "qwen"
+    model: str = Form("qwen"),  # Only qwen supported
     voting_rounds: int = Form(1),    # 1 = normal, 3 = accuracy boost (majority voting)
     checkbox_enabled: str = Form("false"),  # "true" = run checkbox auto-detection
 ):
@@ -284,13 +257,9 @@ async def extract_fields(
         if not fields_list:
             raise HTTPException(status_code=400, detail="No fields specified")
         
-        # Validate model selection
-        if model == "paddleocr" and not _paddleocr_available:
-            raise HTTPException(status_code=503, detail="PaddleOCR-VL 1.5 not available")
-        if model == "qwen" and not _qwen2vl_available:
+        # Validate model
+        if not _qwen2vl_available:
             raise HTTPException(status_code=503, detail="Qwen2-VL model not available")
-        if model not in ("qwen", "paddleocr"):
-            raise HTTPException(status_code=400, detail=f"Unknown model: {model}. Use 'qwen' or 'paddleocr'")
         
         # Process PDF → Image (cached)
         t_start = time.time()
@@ -309,32 +278,16 @@ async def extract_fields(
         try:
             async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
                 async with _gpu_semaphore:
-                    global _active_model
                     print(f"🔒 GPU semaphore acquired for extraction")
                     
-                    # ─── VRAM Swap: unload previous model if switching ───
-                    if _active_model and _active_model != model:
-                        print(f"🔄 Swapping model: {_active_model} → {model}")
-                        if _active_model == "qwen" and _paddleocr_available:
-                            unload_qwen2vl_model()
-                        elif _active_model == "paddleocr" and _qwen2vl_available:
-                            unload_paddleocr_pipeline()
-                    
-                    # ─── Run selected extractor ───
-                    if model == "paddleocr":
-                        extractor = PaddleOCRExtractor()
-                        results = extractor.extract(image, [], [], field_labels)
-                        model_signals = extractor.get_last_signals()
-                        extraction_meta = extractor.get_last_meta()
-                    else:
-                        extractor = Qwen2VLExtractor()
-                        results = extractor.extract(
-                            image, [], [], field_labels,
-                            ocr_source="none",
-                            voting_rounds=voting_rounds,
-                        )
-                        model_signals = extractor.get_last_signals()
-                        extraction_meta = extractor.get_last_meta()
+                    extractor = Qwen2VLExtractor()
+                    results = extractor.extract(
+                        image, [], [], field_labels,
+                        ocr_source="none",
+                        voting_rounds=voting_rounds,
+                    )
+                    model_signals = extractor.get_last_signals()
+                    extraction_meta = extractor.get_last_meta()
                     
                     # ─── Auto-detect checkbox fields (only when checkbox mode enabled) ───
                     cb_enabled = checkbox_enabled.lower() == "true"
@@ -659,10 +612,8 @@ async def ask_question(
             raise HTTPException(status_code=400, detail="Question is required")
         
         # Validate model
-        if model == "qwen" and not _qwen2vl_available:
+        if not _qwen2vl_available:
             raise HTTPException(status_code=503, detail="Qwen2-VL not available")
-        if model == "paddleocr" and not _paddleocr_available:
-            raise HTTPException(status_code=503, detail="PaddleOCR-VL not available")
         
         # Process PDF → image (cached — avoids re-processing on every question)
         image, _ = get_or_process_file(pdf_bytes, file.filename)
@@ -673,25 +624,8 @@ async def ask_question(
         try:
             async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
                 async with _gpu_semaphore:
-                    global _active_model
-                    
-                    # VRAM swap if needed
-                    if _active_model and _active_model != model:
-                        if _active_model == "qwen" and _paddleocr_available:
-                            unload_qwen2vl_model()
-                        elif _active_model == "paddleocr" and _qwen2vl_available:
-                            unload_paddleocr_pipeline()
-                    
-                    if model == "paddleocr":
-                        extractor = PaddleOCRExtractor()
-                        answer = extractor.extract(image, [], [], [question.strip()])
-                        # PaddleOCR returns a dict
-                        answer = answer.get(question.strip(), "")
-                        _active_model = "paddleocr"
-                    else:
-                        qwen = Qwen2VLExtractor()
-                        answer = qwen.ask_question(image, question.strip())
-                        _active_model = "qwen"
+                    qwen = Qwen2VLExtractor()
+                    answer = qwen.ask_question(image, question.strip())
                         
         except TimeoutError:
             raise HTTPException(
@@ -749,10 +683,8 @@ async def re_extract_field(
             raise HTTPException(status_code=400, detail="Field name is required")
         
         # Validate model
-        if model == "qwen" and not _qwen2vl_available:
+        if not _qwen2vl_available:
             raise HTTPException(status_code=503, detail="Qwen2-VL not available")
-        if model == "paddleocr" and not _paddleocr_available:
-            raise HTTPException(status_code=503, detail="PaddleOCR-VL not available")
         
         # Process PDF → image (cached)
         image, _ = get_or_process_file(pdf_bytes, file.filename)
@@ -764,25 +696,9 @@ async def re_extract_field(
         try:
             async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
                 async with _gpu_semaphore:
-                    global _active_model
-                    
-                    if _active_model and _active_model != model:
-                        if _active_model == "qwen" and _paddleocr_available:
-                            unload_qwen2vl_model()
-                        elif _active_model == "paddleocr" and _qwen2vl_available:
-                            unload_paddleocr_pipeline()
-                    
-                    if model == "paddleocr":
-                        extractor = PaddleOCRExtractor()
-                        results = extractor.extract(image, [], [], [field])
-                        value = results.get(field, "")
-                        signal = "paddleocr"
-                        _active_model = "paddleocr"
-                    else:
-                        qwen = Qwen2VLExtractor()
-                        value = qwen._extract_single_field(image, field)
-                        signal = "re-extract"
-                        _active_model = "qwen"
+                    qwen = Qwen2VLExtractor()
+                    value = qwen._extract_single_field(image, field)
+                    signal = "re-extract"
                         
         except TimeoutError:
             raise HTTPException(

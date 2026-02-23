@@ -3,7 +3,9 @@ FROM node:20-slim AS frontend-build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
+COPY vite.config.js ./
 COPY index.html ./
+COPY 2/ ./2/
 COPY src/ ./src/
 COPY public/ ./public/
 COPY assets/ ./assets/

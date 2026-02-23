@@ -29,14 +29,14 @@ export async function checkBackendHealth() {
 }
 
 /**
- * Extract fields from PDF using selected model
+ * Extract fields from PDF using Qwen model
  * @param {File} file - PDF file
  * @param {Array} fields - Array of {key, question} objects
- * @param {string} model - "paddleocr" or "qwen" (default: "paddleocr")
+ * @param {string} model - Model to use (default: "qwen")
  * @param {number} votingRounds - Number of voting passes (default: 1, use 3 for accuracy boost)
  * @returns {Object} Extracted field values
  */
-export async function extractFields(file, fields, model = "paddleocr", votingRounds = 1, checkboxEnabled = false) {
+export async function extractFields(file, fields, model = "qwen", votingRounds = 1, checkboxEnabled = false) {
   try {
     const formData = new FormData();
     formData.append("file", file);
@@ -149,7 +149,7 @@ export async function detectCheckboxes(file) {
  * Ask a natural language question about a PDF document
  * @param {File} file - PDF file
  * @param {string} question - Question to ask
- * @param {string} model - "paddleocr" or "qwen"
+ * @param {string} model - Model to use (default: "qwen")
  * @returns {Object} {answer, time_seconds}
  */
 export async function askQuestion(file, question, model = "qwen") {
@@ -185,7 +185,7 @@ export async function askQuestion(file, question, model = "qwen") {
  * Re-extract a single field from a PDF
  * @param {File} file - PDF file
  * @param {string} fieldName - Field to re-extract
- * @param {string} model - "paddleocr" or "qwen"
+ * @param {string} model - Model to use (default: "qwen")
  * @returns {Object} {field, value, signal, time_seconds}
  */
 export async function reExtractField(file, fieldName, model = "qwen") {

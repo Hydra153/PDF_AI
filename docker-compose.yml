@@ -14,6 +14,9 @@ services:
       # Mount source code for live development
       - ./src:/app/src
       - ./backend:/app/backend
+      - ./2:/app/2
+      - ./index.html:/app/index.html
+      - ./vite.config.js:/app/vite.config.js
     deploy:
       resources:
         reservations:
