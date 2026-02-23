@@ -112,7 +112,7 @@ export function createChat(containerEl) {
     </div>
     <div class="chat-input-bar">
       <div class="chat-input-wrapper">
-        <input type="text" class="chat-input" placeholder="Upload a PDF to start..." disabled />
+        <input type="text" class="chat-input" placeholder="Upload a document to start..." disabled />
         <span class="chat-disclaimer">AI can make mistakes. Please verify important information.</span>
       </div>
       <button class="chat-send-btn" disabled title="Send">${icons.send(16)}</button>
@@ -169,7 +169,7 @@ export function createChat(containerEl) {
         <div class="chat-empty">
           <div class="chat-empty-icon">${icons.messageSquare(32)}</div>
           <p>Ask anything about your document</p>
-          <span>${_file ? "Try one of these questions" : "Upload a PDF first"}</span>
+          <span>${_file ? "Try one of these questions" : "Upload a document first"}</span>
           ${suggestionsHtml}
         </div>
       `;

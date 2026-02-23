@@ -54,8 +54,8 @@ function renderApp() {
 
       <section class="panel">
         <div class="upload-area" id="drop-zone">
-          <input type="file" id="file-input" accept="application/pdf" style="display: none" />
-          <button id="upload-btn">Choose PDF File</button>
+          <input type="file" id="file-input" accept="application/pdf,image/png,image/jpeg,image/jpg,image/tiff,image/bmp,image/webp" style="display: none" />
+          <button id="upload-btn">Choose File</button>
           <p id="file-name">No file selected</p>
         </div>
 
@@ -580,7 +580,7 @@ function renderApp() {
   resultsContainer.innerHTML = `
     <div class="empty-results animate-fadeUp">
       <div style="font-size: 2rem; margin-bottom: 8px; color: var(--muted);">${icons.file(32)}</div>
-      <p>Upload a PDF to extract data</p>
+      <p>Upload a document to extract data</p>
     </div>
   `;
 
@@ -603,10 +603,40 @@ function renderApp() {
     e.preventDefault();
     dropZone.classList.remove("dragover");
     const files = e.dataTransfer.files;
-    if (files.length > 0 && files[0].type === "application/pdf") {
+    if (files.length > 0 && isSupportedFile(files[0])) {
       await handleFileSelect(files[0]);
     }
   });
+
+  // Paste support (Ctrl+V images and PDFs)
+  document.addEventListener("paste", async (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        if (file && isSupportedFile(file)) {
+          e.preventDefault();
+          await handleFileSelect(file);
+          return;
+        }
+      }
+    }
+  });
+
+  // Helper: check if file is supported (PDF or image)
+  function isSupportedFile(file) {
+    const supported = [
+      "application/pdf",
+      "image/png", "image/jpeg", "image/jpg",
+      "image/tiff", "image/bmp", "image/webp"
+    ];
+    return supported.includes(file.type);
+  }
+
+  function isImageFile(file) {
+    return file.type.startsWith("image/");
+  }
 
   async function handleFileSelect(file) {
     selectedFile = file;
@@ -859,12 +889,19 @@ function renderApp() {
     }
 
     try {
-      console.log("Rendering PDF preview...");
+      console.log("Rendering document preview...");
       noPreview.style.display = "none";
 
-      // Render PDF page as image at good quality
-      const imageDataUrl = await pdfPageToImage(selectedFile, 1, 2.0);
-      previewImg.src = imageDataUrl;
+      if (isImageFile(selectedFile)) {
+        // Image file — show directly via object URL
+        const imageUrl = URL.createObjectURL(selectedFile);
+        previewImg.src = imageUrl;
+        previewImg.onload = () => URL.revokeObjectURL(imageUrl);
+      } else {
+        // PDF file — render via PDF.js
+        const imageDataUrl = await pdfPageToImage(selectedFile, 1, 2.0);
+        previewImg.src = imageDataUrl;
+      }
       previewImg.style.display = "block";
 
       console.log("Document preview rendered");

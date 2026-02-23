@@ -37,7 +37,7 @@ import json
 from pydantic import BaseModel
 
 from config import CORS_ORIGINS, MAX_FILE_SIZE, ALLOWED_EXTENSIONS, QWEN2VL_MODEL, QWEN2VL_DISPLAY_NAME
-from utils.pdf_processor import process_pdf
+from utils.pdf_processor import process_pdf, process_image, is_supported_file, is_image_file
 from hitl_manager import get_hitl_manager
 from training_collector import get_training_collector
 
@@ -117,25 +117,35 @@ _image_cache = {
     "raw": None,         # Raw PIL Image (from pdf_to_images)
 }
 
-def get_or_process_pdf(pdf_bytes, filename="", need_raw=False):
+def get_or_process_file(file_bytes, filename="", need_raw=False):
     """
-    Return cached images if the PDF hasn't changed, otherwise process and cache.
+    Return cached images if the file hasn't changed, otherwise process and cache.
+    Automatically detects PDF vs image files.
     Returns (enhanced_image, raw_image_or_None).
     """
     global _image_cache
-    pdf_hash = hashlib.md5(pdf_bytes).hexdigest()
+    file_hash = hashlib.md5(file_bytes).hexdigest()
     
-    if _image_cache["hash"] == pdf_hash and _image_cache["enhanced"] is not None:
+    if _image_cache["hash"] == file_hash and _image_cache["enhanced"] is not None:
         # Cache hit — but lazily load raw if needed and not yet cached
         if need_raw and _image_cache["raw"] is None:
-            from utils.pdf_processor import pdf_to_images
-            raw_images = pdf_to_images(pdf_bytes)
-            _image_cache["raw"] = raw_images[0] if raw_images else _image_cache["enhanced"]
+            if is_image_file(filename):
+                import io
+                from PIL import Image as PILImage
+                _image_cache["raw"] = PILImage.open(io.BytesIO(file_bytes)).convert('RGB')
+            else:
+                from utils.pdf_processor import pdf_to_images
+                raw_images = pdf_to_images(file_bytes)
+                _image_cache["raw"] = raw_images[0] if raw_images else _image_cache["enhanced"]
         raw = _image_cache["raw"] if need_raw else None
         return _image_cache["enhanced"], raw
     
-    # Cache miss — process PDF
-    images, _ = process_pdf(pdf_bytes)
+    # Cache miss — process file (PDF or image)
+    if is_image_file(filename):
+        images, _ = process_image(file_bytes)
+    else:
+        images, _ = process_pdf(file_bytes)
+    
     if not images:
         return None, None
     
@@ -143,13 +153,18 @@ def get_or_process_pdf(pdf_bytes, filename="", need_raw=False):
     raw = None
     
     if need_raw:
-        from utils.pdf_processor import pdf_to_images
-        raw_images = pdf_to_images(pdf_bytes)
-        raw = raw_images[0] if raw_images else enhanced
+        if is_image_file(filename):
+            import io
+            from PIL import Image as PILImage
+            raw = PILImage.open(io.BytesIO(file_bytes)).convert('RGB')
+        else:
+            from utils.pdf_processor import pdf_to_images
+            raw_images = pdf_to_images(file_bytes)
+            raw = raw_images[0] if raw_images else enhanced
     
     # Store in cache
     _image_cache = {
-        "hash": pdf_hash,
+        "hash": file_hash,
         "filename": filename,
         "enhanced": enhanced,
         "raw": raw,
@@ -253,8 +268,8 @@ async def extract_fields(
     """
     try:
         # Validate
-        if not file.filename.endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        if not is_supported_file(file.filename):
+            raise HTTPException(status_code=400, detail="Only PDF and image files (PNG, JPG, TIFF, BMP) are supported")
         
         pdf_bytes = await file.read()
         if len(pdf_bytes) > MAX_FILE_SIZE:
@@ -280,7 +295,7 @@ async def extract_fields(
         # Process PDF → Image (cached)
         t_start = time.time()
         print(f"📄 Processing PDF: {file.filename} (model: {model})")
-        image, raw_image = get_or_process_pdf(pdf_bytes, file.filename, need_raw=True)
+        image, raw_image = get_or_process_file(pdf_bytes, file.filename, need_raw=True)
         
         if not image:
             raise HTTPException(status_code=400, detail="Could not process PDF")
@@ -511,8 +526,8 @@ async def extract_fields(
 async def auto_find_fields(file: UploadFile = File(...)):
     """Auto-detect field labels in PDF using Qwen2-VL"""
     try:
-        if not file.filename.endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        if not is_supported_file(file.filename):
+            raise HTTPException(status_code=400, detail="Only PDF and image files (PNG, JPG, TIFF, BMP) are supported")
         
         pdf_bytes = await file.read()
         if len(pdf_bytes) > MAX_FILE_SIZE:
@@ -563,8 +578,8 @@ async def auto_find_fields(file: UploadFile = File(...)):
 async def detect_checkboxes(file: UploadFile = File(...)):
     """Auto-detect all physical checkboxes in a PDF document"""
     try:
-        if not file.filename.endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        if not is_supported_file(file.filename):
+            raise HTTPException(status_code=400, detail="Only PDF and image files (PNG, JPG, TIFF, BMP) are supported")
         
         pdf_bytes = await file.read()
         if len(pdf_bytes) > MAX_FILE_SIZE:
@@ -633,8 +648,8 @@ async def ask_question(
     Independent from field extraction — uses VQA for ad-hoc queries.
     """
     try:
-        if not file.filename.endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        if not is_supported_file(file.filename):
+            raise HTTPException(status_code=400, detail="Only PDF and image files (PNG, JPG, TIFF, BMP) are supported")
         
         pdf_bytes = await file.read()
         if len(pdf_bytes) > MAX_FILE_SIZE:
@@ -650,7 +665,7 @@ async def ask_question(
             raise HTTPException(status_code=503, detail="PaddleOCR-VL not available")
         
         # Process PDF → image (cached — avoids re-processing on every question)
-        image, _ = get_or_process_pdf(pdf_bytes, file.filename)
+        image, _ = get_or_process_file(pdf_bytes, file.filename)
         if not image:
             raise HTTPException(status_code=400, detail="Could not process PDF")
         t_start = time.time()
@@ -723,8 +738,8 @@ async def re_extract_field(
     Used for the 'resend' button on result cards.
     """
     try:
-        if not file.filename.endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        if not is_supported_file(file.filename):
+            raise HTTPException(status_code=400, detail="Only PDF and image files (PNG, JPG, TIFF, BMP) are supported")
         
         pdf_bytes = await file.read()
         if len(pdf_bytes) > MAX_FILE_SIZE:
@@ -740,7 +755,7 @@ async def re_extract_field(
             raise HTTPException(status_code=503, detail="PaddleOCR-VL not available")
         
         # Process PDF → image (cached)
-        image, _ = get_or_process_pdf(pdf_bytes, file.filename)
+        image, _ = get_or_process_file(pdf_bytes, file.filename)
         if not image:
             raise HTTPException(status_code=400, detail="Could not process PDF")
         field = field_name.strip()
