@@ -27,11 +27,11 @@ function renderApp() {
     <header class="rd-header">
       <div class="rd-header-logo">
         <div class="rd-logo-icon">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-            <polyline points="14 2 14 8 20 8"/>
-            <line x1="16" y1="13" x2="8" y2="13"/>
-            <line x1="16" y1="17" x2="8" y2="17"/>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="2" width="14" height="20" rx="2" ry="2" fill="rgba(255,255,255,0.15)"/>
+            <path d="M8 7h8M8 11h5"/>
+            <circle cx="16" cy="16" r="3.5" fill="#5ee4a0" stroke="none"/>
+            <path d="M16 14.5v3M14.5 16h3" stroke="white" stroke-width="1.5"/>
           </svg>
         </div>
         <span>ReaDox</span>
@@ -53,20 +53,6 @@ function renderApp() {
       <!-- Extract View -->
       <div id="view-extract">
 
-      <section class="panel" id="fields-panel">
-        <label class="label">Fields to Extract</label>
-        <button id="auto-find-btn" disabled style="width: 100%; margin-bottom: 12px; background: #27ae60;">${icons.search(14)} Auto-Find Fields</button>
-        <div class="field-list" id="field-list"></div>
-        <div class="add-field-row">
-            <input type="text" id="new-field-input" placeholder="Add new field (e.g. Allergies)..." />
-            <button id="add-field-btn" type="button">+ Add</button>
-            <div class="presets-wrapper">
-              <button id="presets-btn" type="button" class="presets-btn">⚙ Presets</button>
-              <div id="presets-dropdown" class="presets-dropdown" style="display:none;"></div>
-            </div>
-        </div>
-      </section>
-
       <section class="panel">
         <div class="upload-area" id="drop-zone">
           <input type="file" id="file-input" accept="application/pdf,image/png,image/jpeg,image/jpg,image/tiff,image/bmp,image/webp" style="display: none" />
@@ -80,13 +66,38 @@ function renderApp() {
           <span id="status-text"></span>
           <small id="status-sub"></small>
         </div>
+      </section>
 
-        <div class="actions">
+      <div id="extraction-wrapper" class="panel" style="padding: 10px; overflow: visible; display: flex; flex-direction: column; gap: 2px;">
+
+      <section class="panel" id="fields-panel" style="box-shadow: none;">
+        <label class="label">Fields to Extract</label>
+        <button id="auto-find-btn" disabled style="width: 100%; margin-bottom: 12px; background: #27ae60;">${icons.search(14)} Auto-Find Fields</button>
+        <div class="field-list" id="field-list"></div>
+        <div class="add-field-row">
+            <input type="text" id="new-field-input" placeholder="Add new field (e.g. Allergies)..." />
+            <button id="add-field-btn" type="button">+ Add</button>
+            <div class="presets-wrapper">
+              <button id="presets-btn" type="button" class="presets-btn">⚙ Presets</button>
+              <div id="presets-dropdown" class="presets-dropdown" style="display:none;"></div>
+            </div>
+        </div>
+        <div id="voting-option" style="margin-top: 12px; padding: 6px 12px; background: rgba(74, 144, 226, 0.04); border: 1px solid rgba(74, 144, 226, 0.12); border-radius: 8px; width: fit-content;">
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+            <input type="checkbox" id="voting-checkbox" style="accent-color: #4a90e2; width: 16px; height: 16px;" />
+            <span style="font-weight: 500; font-size: 13px;">Accuracy Boost</span>
+            <span class="info-tooltip" style="position: relative; display: inline-flex; align-items: center; cursor: help;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+              <span class="info-tooltip-text">3× voting passes — slower but more accurate</span>
+            </span>
+          </label>
+        </div>
+        <div class="actions" style="margin-top: 12px;">
            <button id="extract-btn" disabled>Extract Data</button>
         </div>
       </section>
 
-      <section class="panel output-panel">
+      <section class="panel output-panel" style="box-shadow: none;">
         <div class="status">
           <span data-status>Idle</span>
         </div>
@@ -97,6 +108,8 @@ function renderApp() {
             <div id="scan-results-container" class="results-grid"></div>
         </div>
       </section>
+
+      </div>
 
       <section class="panel" id="analysis-panel">
         <label class="label">Document Analysis</label>
@@ -247,17 +260,17 @@ function renderApp() {
   function renderFields() {
     fieldListEl.innerHTML = CURRENT_FIELDS.map(
       (f, i) => `
-        <div class="field-tag">
+        <div class="field-tag" data-index="${i}" style="cursor: pointer;" title="Click to remove">
             <span>${f.key}</span>
             <button class="remove-field" data-index="${i}">×</button>
         </div>
       `,
     ).join("");
 
-    // Re-attach listeners
-    document.querySelectorAll(".remove-field").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        const idx = parseInt(e.target.dataset.index);
+    // Re-attach listeners — whole card is clickable to remove
+    document.querySelectorAll(".field-tag").forEach((tag) => {
+      tag.addEventListener("click", () => {
+        const idx = parseInt(tag.dataset.index);
         CURRENT_FIELDS.splice(idx, 1);
         renderFields();
       });
@@ -265,13 +278,17 @@ function renderApp() {
   }
 
   // Add Field Logic
-  addFieldBtn.addEventListener("click", () => {
+  const addField = () => {
     const val = newFieldInput.value.trim();
     if (val) {
       CURRENT_FIELDS.push({ key: val, question: `What is the ${val}?` });
       newFieldInput.value = "";
       renderFields();
     }
+  };
+  addFieldBtn.addEventListener("click", addField);
+  newFieldInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") addField();
   });
 
   // ─── Presets Logic (localStorage) ───
@@ -562,6 +579,10 @@ function renderApp() {
     checkboxResultsContainer.innerHTML = "";
     lastCheckboxResults = null;
 
+    // Clear fields from previous document
+    CURRENT_FIELDS = [];
+    renderFields();
+
     await renderLayoutPreview();
   }
 
@@ -842,9 +863,13 @@ function renderApp() {
         );
       }
 
-      statusEl.textContent = "Extracting with Qwen2.5-VL...";
+      const votingChecked = document.getElementById("voting-checkbox")?.checked;
+      const votingRounds = votingChecked ? 3 : 1;
+      statusEl.textContent = votingChecked
+        ? "Extracting with Qwen2.5-VL (3× accuracy boost)..."
+        : "Extracting with Qwen2.5-VL...";
 
-      const extractedData = await extractFields(selectedFile, CURRENT_FIELDS, "qwen", 1, checkboxEnabled);
+      const extractedData = await extractFields(selectedFile, CURRENT_FIELDS, "qwen", votingRounds, checkboxEnabled);
 
       console.log("--- QWEN OUTPUT (JSON) ---");
       console.log(JSON.stringify(extractedData, null, 2));

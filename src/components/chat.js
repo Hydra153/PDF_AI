@@ -19,6 +19,7 @@ export function createChat(containerEl) {
   let _messages = []; // { role: "user"|"ai", text: string, time?: number, id: string }
   let _isOpen = false;
   let _isLoading = false;
+  let _isPinned = false;
   let _isFirstQuery = true;  // Track first query for time estimate
 
   // Suggested questions shown when a document is loaded
@@ -101,7 +102,12 @@ export function createChat(containerEl) {
         ${icons.messageSquare(16)}
         <span>Document Q&A</span>
       </div>
-      <button class="chat-close-btn" title="Close">${icons.x(16)}</button>
+      <div class="chat-header-actions">
+        <button class="chat-pin-btn" title="Pin panel open">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 11V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v7"/><path d="M5 15h14l-1.5-4H6.5z"/></svg>
+        </button>
+        <button class="chat-close-btn" title="Close">${icons.x(16)}</button>
+      </div>
     </div>
     <div class="chat-messages" id="chat-messages">
       <div class="chat-empty">
@@ -113,7 +119,7 @@ export function createChat(containerEl) {
     <div class="chat-input-bar">
       <div class="chat-input-wrapper">
         <input type="text" class="chat-input" placeholder="Upload a document to start..." disabled />
-        <span class="chat-disclaimer">AI can make mistakes. Please verify important information.</span>
+        <span class="chat-disclaimer">AI responses may be inaccurate — always verify.</span>
       </div>
       <button class="chat-send-btn" disabled title="Send">${icons.send(16)}</button>
     </div>
@@ -127,20 +133,32 @@ export function createChat(containerEl) {
   const inputEl = panel.querySelector(".chat-input");
   const sendBtn = panel.querySelector(".chat-send-btn");
   const closeBtn = panel.querySelector(".chat-close-btn");
+  const pinBtn = panel.querySelector(".chat-pin-btn");
 
   // ─── Toggle ───
   function openChat() {
     _isOpen = true;
     panel.classList.add("open");
     toggle.classList.add("active");
+    document.body.classList.add("chat-open");
     inputEl.focus();
   }
 
   function closeChat() {
+    if (_isPinned) return;
     _isOpen = false;
     panel.classList.remove("open");
     toggle.classList.remove("active");
+    document.body.classList.remove("chat-open");
   }
+
+  // ─── Pin Toggle ───
+  pinBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    _isPinned = !_isPinned;
+    pinBtn.classList.toggle("pinned", _isPinned);
+    pinBtn.title = _isPinned ? "Unpin panel" : "Pin panel open";
+  });
 
   toggle.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -148,9 +166,9 @@ export function createChat(containerEl) {
   });
   closeBtn.addEventListener("click", closeChat);
 
-  // Click outside to close
+  // Click outside to close (respects pin)
   document.addEventListener("click", (e) => {
-    if (_isOpen && !panel.contains(e.target) && !toggle.contains(e.target)) {
+    if (_isOpen && !_isPinned && !panel.contains(e.target) && !toggle.contains(e.target)) {
       closeChat();
     }
   });
