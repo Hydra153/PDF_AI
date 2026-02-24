@@ -439,6 +439,14 @@ export function createChat(containerEl) {
 
   // ─── Public API ───
   return {
+    open() {
+      openChat();
+    },
+    pin() {
+      _isPinned = true;
+      pinBtn.classList.add("pinned");
+      pinBtn.title = "Unpin panel";
+    },
     setFile(file) {
       const isNewFile = !_file || _file.name !== file.name;
       _file = file;

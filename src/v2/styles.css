@@ -12,6 +12,19 @@
   --shadow: rgba(33, 33, 33, 0.08);
 }
 
+/* ─── Dark Mode ─── */
+body.dark {
+  --bg: #141418;
+  --bg-accent: #1e1e24;
+  --panel: rgba(30, 30, 36, 0.85);
+  --panel-border: rgba(255, 255, 255, 0.06);
+  --fg: #e8e6e3;
+  --muted: #8a8a8a;
+  --accent: #4ecca3;
+  --accent-2: #e5945a;
+  --shadow: rgba(0, 0, 0, 0.25);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -24,6 +37,106 @@ body {
     radial-gradient(circle at 20% 80%, #f0e6d8 0%, var(--bg-accent) 40%);
   color: var(--fg);
   min-height: 100vh;
+  transition: background 0.3s, color 0.3s;
+}
+
+body.dark {
+  background:
+    radial-gradient(circle at top left, #1a1a20 0%, var(--bg) 45%),
+    radial-gradient(circle at 20% 80%, #16161c 0%, var(--bg-accent) 40%);
+}
+
+body.dark .panel {
+  background: var(--panel);
+  border-color: var(--panel-border);
+}
+
+body.dark .upload-area {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+body.dark input,
+body.dark select,
+body.dark textarea {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--fg);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+body.dark .rd-header {
+  background: rgba(20, 20, 24, 0.85);
+  border-bottom-color: rgba(255, 255, 255, 0.04);
+}
+
+body.dark .rd-nav-btn.active {
+  background: rgba(255, 255, 255, 0.1) !important;
+}
+
+body.dark .extract-tab.active {
+  background: rgba(255, 255, 255, 0.1) !important;
+}
+
+body.dark .chat-panel {
+  background: rgba(25, 25, 30, 0.97);
+  border-left-color: rgba(255, 255, 255, 0.06);
+}
+
+body.dark .chat-header {
+  background: rgba(30, 30, 36, 0.6);
+  border-bottom-color: rgba(255, 255, 255, 0.05);
+}
+
+body.dark .chat-input {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: var(--fg);
+}
+
+body.dark .chat-input-bar {
+  background: rgba(30, 30, 36, 0.4);
+  border-top-color: rgba(255, 255, 255, 0.05);
+}
+
+body.dark .chat-bubble.user .chat-bubble-text {
+  background: var(--accent);
+}
+
+body.dark .chat-bubble.ai .chat-bubble-text {
+  background: rgba(78, 204, 163, 0.08);
+  border-color: rgba(78, 204, 163, 0.15);
+}
+
+/* ─── Theme Toggle ─── */
+.theme-toggle {
+  background: none;
+  border: 1px solid rgba(0,0,0,0.08);
+  cursor: pointer;
+  color: var(--muted);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+  padding: 0;
+  box-shadow: none;
+}
+
+.theme-toggle:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--fg);
+  transform: none;
+  box-shadow: none;
+}
+
+body.dark .theme-toggle {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+body.dark .theme-toggle:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 #app {
@@ -412,6 +525,57 @@ body {
 .info-tooltip:hover .info-tooltip-text {
   visibility: visible;
   opacity: 1;
+}
+
+/* ─── Extraction Sub-Tabs ─── */
+.extract-tabs {
+  display: flex;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.035);
+  padding: 3px;
+  border-radius: 8px;
+  margin-bottom: 4px;
+}
+
+.extract-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px !important;
+  border-radius: 6px !important;
+  font-weight: 500;
+  font-size: 0.82rem !important;
+  color: var(--muted);
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.extract-tab.active {
+  background: #fff !important;
+  color: var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08) !important;
+  font-weight: 600;
+}
+
+.extract-tab:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.5) !important;
+  color: var(--fg);
+}
+
+.extract-tab svg {
+  flex-shrink: 0;
+}
+
+.extract-tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .upload-area {

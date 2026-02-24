@@ -27,14 +27,18 @@ function renderApp() {
     <header class="rd-header">
       <div class="rd-header-logo">
         <div class="rd-logo-icon">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="4" y="2" width="14" height="20" rx="2" ry="2" fill="rgba(255,255,255,0.15)"/>
-            <path d="M8 7h8M8 11h5"/>
-            <circle cx="16" cy="16" r="3.5" fill="#5ee4a0" stroke="none"/>
-            <path d="M16 14.5v3M14.5 16h3" stroke="white" stroke-width="1.5"/>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3" y="1" width="15" height="20" rx="2.5" fill="rgba(255,255,255,0.12)" stroke="white" stroke-width="1.4"/>
+            <rect x="6" y="3" width="15" height="20" rx="2.5" fill="rgba(255,255,255,0.2)" stroke="white" stroke-width="1.4"/>
+            <path d="M10 9h8M10 12.5h6" stroke="white" stroke-width="1.3" stroke-linecap="round"/>
+            <line x1="9" y1="16.5" x2="19" y2="16.5" stroke="#4ecca3" stroke-width="2" stroke-linecap="round" opacity="0.9"/>
           </svg>
         </div>
         <span>ReaDox</span>
+        <button id="theme-toggle" class="theme-toggle" title="Toggle dark mode">
+          <svg id="theme-icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg id="theme-icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
       </div>
 
       <nav class="rd-header-nav">
@@ -70,55 +74,69 @@ function renderApp() {
 
       <div id="extraction-wrapper" class="panel" style="padding: 10px; overflow: visible; display: flex; flex-direction: column; gap: 2px;">
 
-      <section class="panel" id="fields-panel" style="box-shadow: none;">
-        <label class="label">Fields to Extract</label>
-        <button id="auto-find-btn" disabled style="width: 100%; margin-bottom: 12px; background: #27ae60;">${icons.search(14)} Auto-Find Fields</button>
-        <div class="field-list" id="field-list"></div>
-        <div class="add-field-row">
-            <input type="text" id="new-field-input" placeholder="Add new field (e.g. Allergies)..." />
-            <button id="add-field-btn" type="button">+ Add</button>
-            <div class="presets-wrapper">
-              <button id="presets-btn" type="button" class="presets-btn">⚙ Presets</button>
-              <div id="presets-dropdown" class="presets-dropdown" style="display:none;"></div>
-            </div>
-        </div>
-        <div id="voting-option" style="margin-top: 12px; padding: 6px 12px; background: rgba(74, 144, 226, 0.04); border: 1px solid rgba(74, 144, 226, 0.12); border-radius: 8px; width: fit-content;">
-          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-            <input type="checkbox" id="voting-checkbox" style="accent-color: #4a90e2; width: 16px; height: 16px;" />
-            <span style="font-weight: 500; font-size: 13px;">Accuracy Boost</span>
-            <span class="info-tooltip" style="position: relative; display: inline-flex; align-items: center; cursor: help;">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-              <span class="info-tooltip-text">3× voting passes — slower but more accurate</span>
-            </span>
-          </label>
-        </div>
-        <div class="actions" style="margin-top: 12px;">
-           <button id="extract-btn" disabled>Extract Data</button>
-        </div>
-      </section>
+      <!-- Extraction Tab Bar -->
+      <nav class="extract-tabs">
+        <button class="extract-tab active" data-tab="fields">${icons.clipboard(14)} Fields</button>
+        <button class="extract-tab" data-tab="checkboxes">${icons.checkCircle(14)} Checkboxes</button>
+      </nav>
 
-      <section class="panel output-panel" style="box-shadow: none;">
-        <div class="status">
-          <span data-status>Idle</span>
-        </div>
-        <div id="results-container" class="results-grid"></div>
-        
-        <div id="scan-results-section" style="display:none; margin-top: 24px;">
-            <p class="label">Smart Scan (Detected Patterns)</p>
-            <div id="scan-results-container" class="results-grid"></div>
-        </div>
-      </section>
+      <!-- Fields Tab Content -->
+      <div id="tab-content-fields" class="extract-tab-content">
+        <section class="panel" id="fields-panel" style="box-shadow: none;">
+          <label class="label">Fields to Extract</label>
+          <button id="auto-find-btn" disabled style="width: 100%; margin-bottom: 12px; background: #27ae60;">${icons.search(14)} Auto-Find Fields</button>
+          <div class="field-list" id="field-list"></div>
+          <div class="add-field-row">
+              <input type="text" id="new-field-input" placeholder="Add new field (e.g. Allergies)..." />
+              <button id="add-field-btn" type="button">+ Add</button>
+              <div class="presets-wrapper">
+                <button id="presets-btn" type="button" class="presets-btn">⚙ Presets</button>
+                <div id="presets-dropdown" class="presets-dropdown" style="display:none;"></div>
+              </div>
+          </div>
+          <div id="voting-option" style="margin-top: 12px; padding: 6px 12px; background: rgba(74, 144, 226, 0.04); border: 1px solid rgba(74, 144, 226, 0.12); border-radius: 8px; width: fit-content;">
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+              <input type="checkbox" id="voting-checkbox" style="accent-color: #4a90e2; width: 16px; height: 16px;" />
+              <span style="font-weight: 500; font-size: 13px;">Accuracy Boost</span>
+              <span class="info-tooltip" style="position: relative; display: inline-flex; align-items: center; cursor: help;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                <span class="info-tooltip-text">3× voting passes — slower but more accurate</span>
+              </span>
+            </label>
+          </div>
+          <div class="actions" style="margin-top: 12px;">
+             <button id="extract-btn" disabled>Extract Data</button>
+          </div>
+        </section>
 
+        <section class="panel output-panel" style="box-shadow: none;">
+          <div class="status">
+            <span data-status>Idle</span>
+          </div>
+          <div id="results-container" class="results-grid"></div>
+          
+          <div id="scan-results-section" style="display:none; margin-top: 24px;">
+              <p class="label">Smart Scan (Detected Patterns)</p>
+              <div id="scan-results-container" class="results-grid"></div>
+          </div>
+        </section>
       </div>
 
-      <section class="panel" id="analysis-panel">
-        <label class="label">Document Analysis</label>
-        <p style="font-size: 0.8rem; color: var(--muted); margin: 0 0 12px 0;">Detect structured elements beyond text fields</p>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-          <button id="detect-checkboxes-btn" disabled style="background: #8e44ad; color: white; border: none; padding: 10px 18px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 6px; transition: all 0.2s;">☑ Find All Checkboxes</button>
-        </div>
-        <div id="checkbox-results-container" style="margin-top: 16px;"></div>
-      </section>
+      <!-- Checkboxes Tab Content -->
+      <div id="tab-content-checkboxes" class="extract-tab-content" style="display: none;">
+        <section class="panel" style="box-shadow: none;">
+          <label class="label">Checkbox Detection</label>
+          <p style="font-size: 0.8rem; color: var(--muted); margin: 0 0 12px 0;">Detect all checkboxes and their states in the document</p>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button id="detect-checkboxes-btn" disabled style="background: #8e44ad; color: white; border: none; padding: 10px 18px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 6px; transition: all 0.2s;">${icons.checkCircle(14)} Find All Checkboxes</button>
+          </div>
+        </section>
+        <section class="panel" style="box-shadow: none;">
+          <div id="checkbox-results-container"></div>
+        </section>
+      </div>
+
+      </div>
 
       <section class="panel">
         <label class="label">Document Preview</label>
@@ -165,18 +183,62 @@ function renderApp() {
   let lastCheckboxResults = null;  // Store for JSON export
   let checkboxEnabled = true;  // Checkbox detection always on
 
-  // Tab Navigation
+  // Tab Navigation (Extract / Review)
   const tabExtract = document.getElementById("tab-extract");
   const tabReview = document.getElementById("tab-review");
   const viewExtract = document.getElementById("view-extract");
   const viewReview = document.getElementById("view-review");
   const reviewContainer = document.getElementById("review-queue-container");
 
+  // ─── Extraction Sub-Tab Navigation (Fields / Checkboxes) ───
+  const extractTabs = document.querySelectorAll(".extract-tab");
+  const extractTabContents = {
+    fields: document.getElementById("tab-content-fields"),
+    checkboxes: document.getElementById("tab-content-checkboxes"),
+  };
+
+  extractTabs.forEach(tab => {
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.tab;
+      // Toggle active class
+      extractTabs.forEach(t => t.classList.remove("active"));
+      tab.classList.add("active");
+      // Toggle content visibility
+      Object.entries(extractTabContents).forEach(([key, el]) => {
+        el.style.display = key === target ? "" : "none";
+      });
+    });
+  });
+
   // Initialize ReviewQueue
   const reviewQueue = new ReviewQueue(reviewContainer);
 
   // Initialize Chat Panel
   const chatPanel = createChat(document.body);
+
+  // Open chat by default and pin it
+  chatPanel.open();
+  chatPanel.pin();
+
+  // ─── Dark/Light Theme Toggle ───
+  const themeToggle = document.getElementById("theme-toggle");
+  const sunIcon = document.getElementById("theme-icon-sun");
+  const moonIcon = document.getElementById("theme-icon-moon");
+
+  function applyTheme(dark) {
+    document.body.classList.toggle("dark", dark);
+    sunIcon.style.display = dark ? "none" : "";
+    moonIcon.style.display = dark ? "" : "none";
+    localStorage.setItem("rd-theme", dark ? "dark" : "light");
+  }
+
+  // Load saved preference
+  const savedTheme = localStorage.getItem("rd-theme");
+  if (savedTheme === "dark") applyTheme(true);
+
+  themeToggle.addEventListener("click", () => {
+    applyTheme(!document.body.classList.contains("dark"));
+  });
 
   // Clear queue on page load - ensures consistent state
   // Reviews only make sense with a PDF loaded, so start fresh
