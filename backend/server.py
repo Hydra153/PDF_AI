@@ -29,7 +29,7 @@ from typing import List, Optional
 import json
 from pydantic import BaseModel
 
-from config import CORS_ORIGINS, MAX_FILE_SIZE, ALLOWED_EXTENSIONS, QWEN2VL_MODEL, QWEN2VL_DISPLAY_NAME
+from config import CORS_ORIGINS, MAX_FILE_SIZE, MAX_PDF_PAGES, ALLOWED_EXTENSIONS, QWEN2VL_MODEL, QWEN2VL_DISPLAY_NAME
 from utils.pdf_processor import process_pdf, process_image, is_supported_file, is_image_file
 from hitl_manager import get_hitl_manager
 from training_collector import get_training_collector
@@ -83,7 +83,7 @@ _extraction_context = {
 _gpu_semaphore = asyncio.Semaphore(1)
 _GPU_TIMEOUT_SECONDS = 300  # Max wait time — PaddleOCR-VL first load can take ~60-120s
 
-# ─── Image Cache ───
+# ─── Image Cache (multi-page) ───
 # Caches processed (enhanced) and raw images per PDF to avoid redundant
 # PDF→image conversion + enhancement on every /api/ask or /api/re-extract call.
 # Keyed by MD5 hash of PDF bytes. In-memory only — cleared on new PDF or server restart.
@@ -92,31 +92,30 @@ import hashlib
 _image_cache = {
     "hash": None,        # MD5 of the cached PDF
     "filename": None,    # Original filename
-    "enhanced": None,    # Enhanced PIL Image (from process_pdf)
-    "raw": None,         # Raw PIL Image (from pdf_to_images)
+    "enhanced": [],      # List of enhanced PIL Images (one per page)
+    "raw": [],           # List of raw PIL Images (one per page)
 }
 
 def get_or_process_file(file_bytes, filename="", need_raw=False):
     """
     Return cached images if the file hasn't changed, otherwise process and cache.
     Automatically detects PDF vs image files.
-    Returns (enhanced_image, raw_image_or_None).
+    Returns (enhanced_images: List[Image], raw_images: List[Image] or []).
     """
     global _image_cache
     file_hash = hashlib.md5(file_bytes).hexdigest()
     
-    if _image_cache["hash"] == file_hash and _image_cache["enhanced"] is not None:
+    if _image_cache["hash"] == file_hash and _image_cache["enhanced"]:
         # Cache hit — but lazily load raw if needed and not yet cached
-        if need_raw and _image_cache["raw"] is None:
+        if need_raw and not _image_cache["raw"]:
             if is_image_file(filename):
                 import io
                 from PIL import Image as PILImage
-                _image_cache["raw"] = PILImage.open(io.BytesIO(file_bytes)).convert('RGB')
+                _image_cache["raw"] = [PILImage.open(io.BytesIO(file_bytes)).convert('RGB')]
             else:
                 from utils.pdf_processor import pdf_to_images
-                raw_images = pdf_to_images(file_bytes)
-                _image_cache["raw"] = raw_images[0] if raw_images else _image_cache["enhanced"]
-        raw = _image_cache["raw"] if need_raw else None
+                _image_cache["raw"] = pdf_to_images(file_bytes)
+        raw = _image_cache["raw"] if need_raw else []
         return _image_cache["enhanced"], raw
     
     # Cache miss — process file (PDF or image)
@@ -126,35 +125,37 @@ def get_or_process_file(file_bytes, filename="", need_raw=False):
         images, _ = process_pdf(file_bytes)
     
     if not images:
-        return None, None
+        return [], []
     
-    enhanced = images[0]
-    raw = None
+    # Enforce page limit
+    if len(images) > MAX_PDF_PAGES:
+        raise ValueError(f"PDF has {len(images)} pages (max {MAX_PDF_PAGES}). Please split the document.")
     
+    raw = []
     if need_raw:
         if is_image_file(filename):
             import io
             from PIL import Image as PILImage
-            raw = PILImage.open(io.BytesIO(file_bytes)).convert('RGB')
+            raw = [PILImage.open(io.BytesIO(file_bytes)).convert('RGB')]
         else:
             from utils.pdf_processor import pdf_to_images
-            raw_images = pdf_to_images(file_bytes)
-            raw = raw_images[0] if raw_images else enhanced
+            raw = pdf_to_images(file_bytes)
     
     # Store in cache
     _image_cache = {
         "hash": file_hash,
         "filename": filename,
-        "enhanced": enhanced,
+        "enhanced": images,
         "raw": raw,
     }
     
-    return enhanced, raw
+    print(f"📄 Cached {len(images)} page(s) for {filename}")
+    return images, raw
 
 def clear_image_cache():
     """Clear the image cache (called when PDF changes or server shuts down)."""
     global _image_cache
-    _image_cache = {"hash": None, "filename": None, "enhanced": None, "raw": None}
+    _image_cache = {"hash": None, "filename": None, "enhanced": [], "raw": []}
 
 def save_extraction_context(image, filename, page_num=1, fields=None, results=None,
                            signals=None, model_used="qwen", voting_rounds=1):
@@ -228,6 +229,7 @@ async def extract_fields(
     model: str = Form("qwen"),  # Only qwen supported
     voting_rounds: int = Form(1),    # 1 = normal, 3 = accuracy boost (majority voting)
     checkbox_enabled: str = Form("false"),  # "true" = run checkbox auto-detection
+    raw_mode: str = Form("false"),  # "true" = skip image enhancement, feed raw image to VLM
 ):
     """
     Extract specified fields from PDF document using Qwen2-VL.
@@ -261,107 +263,280 @@ async def extract_fields(
         if not _qwen2vl_available:
             raise HTTPException(status_code=503, detail="Qwen2-VL model not available")
         
-        # Process PDF → Image (cached)
+        # Process PDF → Images (cached, multi-page)
         t_start = time.time()
         print(f"📄 Processing PDF: {file.filename} (model: {model})")
-        image, raw_image = get_or_process_file(pdf_bytes, file.filename, need_raw=True)
+        try:
+            enhanced_images, raw_images = get_or_process_file(pdf_bytes, file.filename, need_raw=True)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         
-        if not image:
+        if not enhanced_images:
             raise HTTPException(status_code=400, detail="Could not process PDF")
         
-        if not raw_image:
-            raw_image = image
-        field_labels = [f['key'] for f in fields_list]
-        print(f"🤖 Extracting {len(field_labels)} fields with {model}...")
+        if not raw_images:
+            raw_images = enhanced_images
         
-        # ─── GPU Inference (serialized by semaphore) ───
+        # DEV: Raw mode — bypass enhancement, feed raw images directly to VLM
+        use_raw = raw_mode.lower() == "true"
+        if use_raw:
+            print(f"   🔧 DEV RAW MODE — skipping image enhancement, using raw images")
+            enhanced_images = raw_images
+        
+        num_pages = len(enhanced_images)
+        field_labels = [f['key'] for f in fields_list]
+        print(f"🤖 Extracting {len(field_labels)} fields from {num_pages} page(s) with {model}...")
+        
+        # ─── Multi-Page Extraction (serialized by GPU semaphore) ───
+        all_results = {}          # field → value (first non-empty wins)
+        all_signals = {}          # field → signal dict (includes page number)
+        all_meta = {}             # merged extraction metadata
+        
         try:
             async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
                 async with _gpu_semaphore:
                     print(f"🔒 GPU semaphore acquired for extraction")
-                    
                     extractor = Qwen2VLExtractor()
-                    results = extractor.extract(
-                        image, [], [], field_labels,
-                        ocr_source="none",
-                        voting_rounds=voting_rounds,
-                    )
-                    model_signals = extractor.get_last_signals()
-                    extraction_meta = extractor.get_last_meta()
                     
-                    # ─── Auto-detect checkbox fields (only when checkbox mode enabled) ───
+                    # ─── Table Pre-Scan: detect table structure per page ───
+                    import re as _re
+                    page_table_scans = {}  # page_idx → scan result
+                    detected_columns = {}  # normalized_col_name → (original_col_name, page_idx)
+                    detected_row_prefix = None  # e.g. "SL."
+                    
+                    for page_idx in range(num_pages):
+                        scan = extractor.scan_table_structure(enhanced_images[page_idx])
+                        page_table_scans[page_idx] = scan
+                        if scan.get("has_table"):
+                            for col in scan.get("columns", []):
+                                col_norm = col.strip().lower().rstrip(".")
+                                detected_columns[col_norm] = (col, page_idx)
+                            if scan.get("row_index") and not detected_row_prefix:
+                                detected_row_prefix = scan["row_index"].strip().rstrip(".")
+                    
+                    if detected_columns:
+                        print(f"   🔍 Detected table columns: {list(detected_columns.keys())}")
+                        if detected_row_prefix:
+                            print(f"   🔍 Row index prefix: '{detected_row_prefix}'")
+                    
+                    # ─── Smart field routing using scan results ───
+                    table_column_fields = []   # field matches a column header → column extraction
+                    table_row_fields = []      # field matches row_index + number → row extraction
+                    table_keyword_fields = []  # field contains "table" → full table extraction
+                    normal_fields = []         # everything else → normal batch extraction
+                    
+                    for f in field_labels:
+                        f_lower = f.strip().lower()
+                        f_norm = f_lower.rstrip(".")
+                        
+                        # Check if field contains "table" keyword
+                        if "table" in f_lower:
+                            table_keyword_fields.append(f)
+                        # Check if field matches a detected column header (exact, case-insensitive)
+                        elif f_norm in detected_columns:
+                            table_column_fields.append(f)
+                        # Check if field matches row index pattern: prefix + number (SL. 3, SL.3, SL 3)
+                        elif detected_row_prefix:
+                            prefix_norm = detected_row_prefix.lower()
+                            # Match: "SL. 3", "SL.3", "SL 3", "sl.7", "Row 2", "#5"
+                            row_pattern = rf'^({_re.escape(prefix_norm)}\.?\s*|row\s*(no\.?\s*)?|#)\s*\d+$'
+                            if _re.match(row_pattern, f_lower):
+                                table_row_fields.append(f)
+                            else:
+                                normal_fields.append(f)
+                        # Check default row patterns (Row N, #N)
+                        elif _re.match(r'^(row\s*(no\.?\s*)?|#)\s*\d+$', f_lower):
+                            table_row_fields.append(f)
+                        else:
+                            normal_fields.append(f)
+                    
+                    if table_column_fields or table_row_fields or table_keyword_fields:
+                        print(f"\n   📊 Smart routing: {len(table_keyword_fields)} table, {len(table_column_fields)} column, {len(table_row_fields)} row, {len(normal_fields)} normal")
+                    
+                    # ─── Process table fields ───
+                    all_table_fields = table_keyword_fields + table_column_fields + table_row_fields
+                    if all_table_fields:
+                        for field_name in all_table_fields:
+                            # Find which page has the table
+                            table_pages = [idx for idx, s in page_table_scans.items() if s.get("has_table")]
+                            if not table_pages:
+                                table_pages = list(range(num_pages))
+                            
+                            for page_idx in table_pages:
+                                page_img = enhanced_images[page_idx]
+                                try:
+                                    table_data, table_type = extractor.extract_table(page_img, field_name)
+                                    if table_data is not None and table_type is not None:
+                                        all_results[field_name] = json.dumps(table_data, ensure_ascii=False)
+                                        sig = {"source": "table", "flags": [], "page": page_idx + 1, "type": table_type}
+                                        if table_type == "table" and isinstance(table_data, list):
+                                            sig["rows"] = len(table_data)
+                                            sig["cols"] = len(table_data[0]) if table_data else 0
+                                        elif table_type == "column" and isinstance(table_data, list):
+                                            sig["count"] = len(table_data)
+                                        all_signals[field_name] = sig
+                                        print(f"   📊 ✅ '{field_name}' → {table_type} (page {page_idx + 1})")
+                                        break
+                                except Exception as e:
+                                    print(f"   📊 Table attempt failed for '{field_name}' page {page_idx+1}: {e}")
+                            if field_name not in all_results:
+                                all_results[field_name] = ""
+                                all_signals[field_name] = {"source": "table", "flags": ["not_found"], "page": 1}
+                                print(f"   📊 '{field_name}' — no table found")
+                    
+                    # ─── Normal field extraction ───
+                    field_labels_for_extract = normal_fields
+                    
+                    for page_idx in range(num_pages):
+                        page_num = page_idx + 1
+                        page_img = enhanced_images[page_idx]
+                        raw_img = raw_images[page_idx] if page_idx < len(raw_images) else page_img
+                        
+                        # Skip pages for fields already found (optimization)
+                        remaining_fields = [f for f in field_labels_for_extract if not all_results.get(f, "").strip()]
+                        if not remaining_fields and page_num > 1:
+                            print(f"   ✅ All fields found — skipping page {page_num}/{num_pages}")
+                            continue
+                        
+                        # On first page, extract all fields. On subsequent pages, only missing ones.
+                        extract_fields_for_page = field_labels_for_extract if page_num == 1 else remaining_fields
+                        if not extract_fields_for_page:
+                            continue
+                        
+                        print(f"\n   📄 Page {page_num}/{num_pages}: extracting {len(extract_fields_for_page)} fields...")
+                        page_results = extractor.extract(
+                            page_img, [], [], extract_fields_for_page,
+                            ocr_source="none",
+                            voting_rounds=voting_rounds,
+                        )
+                        page_signals = extractor.get_last_signals()
+                        
+                        # Merge: first non-empty value wins per field
+                        for field in extract_fields_for_page:
+                            value = page_results.get(field, "")
+                            if value.strip() and not all_results.get(field, "").strip():
+                                all_results[field] = value
+                                all_signals[field] = {
+                                    **page_signals.get(field, {"source": "batch", "flags": []}),
+                                    "page": page_num,
+                                }
+                            elif field not in all_results:
+                                all_results[field] = value
+                                all_signals[field] = {
+                                    **page_signals.get(field, {"source": "batch", "flags": ["empty_value"]}),
+                                    "page": page_num,
+                                }
+                    
+                    # ─── Auto-detect checkbox fields (run on raw images) ───
+                    model_signals = all_signals
+                    results = all_results
                     cb_enabled = checkbox_enabled.lower() == "true"
                     if cb_enabled and model == "qwen" and _qwen2vl_available:
-                        # Normalize helper: strip spaces/punctuation for comparison
                         def _norm(s):
-                            return ''.join(s.strip().lower().split())  # "Blue Berries" → "blueberries"
+                            return ''.join(s.strip().lower().split())
                         
                         echo_fields = []
                         for field_name, value in results.items():
                             if isinstance(value, str):
-                                # Match: exact OR normalized (e.g. "Blue Berries" == "Blueberries")
                                 if (field_name.strip().lower() == value.strip().lower() or
                                     _norm(field_name) == _norm(value)):
                                     echo_fields.append(field_name)
                         
                         if echo_fields:
-                            print(f"   ☑️ Detected {len(echo_fields)} checkbox-style fields (value ≈ field name)")
-                            print(f"   🔄 Running batch checkbox detection on raw image...")
-                            qwen = Qwen2VLExtractor()
-                            all_checkboxes = qwen.extract_checkboxes(raw_image, fields=None)
+                            print(f"   ☑️ Detected {len(echo_fields)} checkbox-style fields")
+                            # Run checkbox detection on all raw pages
+                            all_checkboxes = []
+                            for page_idx, raw_img in enumerate(raw_images):
+                                page_cbs = extractor.extract_checkboxes(raw_img, fields=None)
+                                for cb in page_cbs:
+                                    cb["_page"] = page_idx + 1
+                                all_checkboxes.extend(page_cbs)
                             
-                            # Build lookup: lowercase label → checkbox result + normalized lookup
                             cb_lookup = {}
                             cb_norm_lookup = {}
                             for cb in all_checkboxes:
                                 cb_lookup[cb["label"].strip().lower()] = cb
                                 cb_norm_lookup[_norm(cb["label"])] = cb
                             
-                            # Match each echo field to detected checkboxes
                             for field_name in echo_fields:
                                 fn_lower = field_name.strip().lower()
                                 fn_norm = _norm(field_name)
-                                matched = cb_lookup.get(fn_lower)
+                                matched = cb_lookup.get(fn_lower) or cb_norm_lookup.get(fn_norm)
                                 
-                                # Try normalized match (Blue Berries → blueberries)
-                                if not matched:
-                                    matched = cb_norm_lookup.get(fn_norm)
-                                
-                                # Try fuzzy substring match
                                 if not matched:
                                     for cb_label, cb_data in cb_lookup.items():
                                         if fn_lower in cb_label or cb_label in fn_lower:
                                             matched = cb_data
                                             break
                                 
-                                # ─── Single-item VQA fallback for missed fields (e.g. Turkey) ───
                                 if not matched:
-                                    print(f"      🔍 '{field_name}' not in batch — trying single-item VQA...")
                                     try:
-                                        is_checked = qwen._extract_single_checkbox(raw_image, field_name)
-                                        matched = {
-                                            "label": field_name,
-                                            "checked": is_checked,
-                                            "signal": {
-                                                "source": "checkbox_vqa",
-                                                "flags": ["vqa_fallback"],
-                                            },
-                                        }
-                                        print(f"      {'☑' if is_checked else '☐'} Single-item: '{field_name}' → {'Checked' if is_checked else 'Unchecked'}")
-                                    except Exception as e:
-                                        print(f"      ⚠️ Single-item fallback failed for '{field_name}': {e}")
+                                        # Try VQA fallback on the page where the field was found
+                                        field_page = model_signals.get(field_name, {}).get("page", 1)
+                                        fallback_img = raw_images[field_page - 1] if field_page <= len(raw_images) else raw_images[0]
+                                        is_checked = extractor._extract_single_checkbox(fallback_img, field_name)
+                                        matched = {"label": field_name, "checked": is_checked, "_page": field_page,
+                                                   "signal": {"source": "checkbox_vqa", "flags": ["vqa_fallback"]}}
+                                    except Exception:
+                                        pass
                                 
                                 if matched:
                                     status_str = "Checked" if matched["checked"] else "Unchecked"
                                     results[field_name] = status_str
-                                    model_signals[field_name] = matched.get("signal", {"source": "checkbox_batch", "flags": []})
-                                    print(f"      {'☑' if matched['checked'] else '☐'} '{field_name}' → {status_str} [{model_signals[field_name].get('source', 'batch')}]")
+                                    model_signals[field_name] = {
+                                        **matched.get("signal", {"source": "checkbox_batch", "flags": []}),
+                                        "page": matched.get("_page", 1),
+                                    }
                                 else:
                                     results[field_name] = "Not Found"
-                                    model_signals[field_name] = {"source": "checkbox_batch", "flags": ["not_found"]}
-                                    print(f"      ❓ '{field_name}' → No matching checkbox found")
+                                    model_signals[field_name] = {"source": "checkbox_batch", "flags": ["not_found"], "page": 1}
                     
-                    _active_model = model
+                    # ─── Table extraction fallback (for empty/echo fields) ───
+                    table_candidates = []
+                    for field_name, value in results.items():
+                        val = value.strip() if isinstance(value, str) else ""
+                        is_empty = not val
+                        is_echo = val.lower() == field_name.strip().lower()
+                        is_not_found = val.lower() in ("not found", "none", "")
+                        # Heuristic: value looks like concatenated column data (3+ items separated by commas or newlines)
+                        parts = [p.strip() for p in val.replace("\n", ",").split(",") if p.strip()]
+                        is_multi_value = len(parts) >= 3
+                        if is_empty or is_echo or is_not_found or is_multi_value:
+                            table_candidates.append(field_name)
+                    
+                    if table_candidates:
+                        print(f"\n   📊 Trying table extraction for {len(table_candidates)} field(s): {table_candidates}")
+                        for field_name in table_candidates:
+                            table_found = False
+                            for page_idx in range(num_pages):
+                                page_img = enhanced_images[page_idx]
+                                try:
+                                    table_data, table_type = extractor.extract_table(page_img, field_name)
+                                    if table_data is not None and table_type is not None:
+                                        # Store as JSON string
+                                        results[field_name] = json.dumps(table_data, ensure_ascii=False)
+                                        # Build signal info
+                                        sig = {
+                                            "source": "table",
+                                            "flags": [],
+                                            "page": page_idx + 1,
+                                            "type": table_type,
+                                        }
+                                        if table_type == "table" and isinstance(table_data, list):
+                                            sig["rows"] = len(table_data)
+                                            sig["cols"] = len(table_data[0]) if table_data else 0
+                                        elif table_type == "column" and isinstance(table_data, list):
+                                            sig["count"] = len(table_data)
+                                        model_signals[field_name] = sig
+                                        table_found = True
+                                        print(f"   📊 ✅ '{field_name}' → {table_type} (page {page_idx + 1})")
+                                        break
+                                except Exception as e:
+                                    print(f"   📊 Table attempt failed for '{field_name}' page {page_idx+1}: {e}")
+                            if not table_found:
+                                print(f"   📊 '{field_name}' — no table found on any page")
+                    
+                    extraction_meta = extractor.get_last_meta()
                     
         except TimeoutError:
             print(f"⏱️ GPU busy — request timed out after {_GPU_TIMEOUT_SECONDS}s")
@@ -371,11 +546,11 @@ async def extract_fields(
             )
         
         t_elapsed = time.time() - t_start
-        print(f"✅ Extraction complete in {t_elapsed:.1f}s")
+        print(f"✅ Extraction complete in {t_elapsed:.1f}s ({num_pages} page(s))")
 
-        # Save complete extraction context for training data collection
+        # Save extraction context (first page image for training)
         save_extraction_context(
-            image=image,
+            image=enhanced_images[0],
             filename=file.filename,
             page_num=1,
             fields=field_labels,
@@ -386,12 +561,10 @@ async def extract_fields(
         )
 
         # ─── Signal-based HITL routing ───
-        # Any field with flags gets routed for human review
         hitl_manager = get_hitl_manager()
         flagged_fields = []
         validation_errors = {}
         
-        # Get validation metadata from extractor
         meta = extraction_meta if model == "paddleocr" else extractor.get_last_meta()
         validation = meta.get("validation", {})
         
@@ -399,7 +572,6 @@ async def extract_fields(
             field_signal = model_signals.get(field_name, {"source": "unknown", "flags": []})
             v_result = validation.get(field_name, {})
             
-            # Collect flags from both extraction signals and validation
             flags = list(field_signal.get("flags", []))
             reason_parts = []
             
@@ -413,7 +585,6 @@ async def extract_fields(
                     flags.append("empty_value")
                 reason_parts.append("Empty value")
             
-            # Add source-specific reasons
             source = field_signal.get("source", "unknown")
             if "fallback_recovery" in flags:
                 reason_parts.append("Recovered by per-field fallback (batch missed)")
@@ -424,7 +595,6 @@ async def extract_fields(
             if "not_found" in flags:
                 reason_parts.append("No matching checkbox found")
             
-            # Flag if any flags exist (excluding empty_value for non-required fields)
             should_flag = bool(flags)
             
             if should_flag:
@@ -435,7 +605,7 @@ async def extract_fields(
                     ai_value=value,
                     signal=source,
                     reason=reason,
-                    page_num=1
+                    page_num=field_signal.get("page", 1)
                 )
                 flagged_fields.append(field_name)
                 print(f"⚠️ Auto-flagged '{field_name}' for review ({reason})")
@@ -453,7 +623,8 @@ async def extract_fields(
             "_meta": {
                 "extraction_model": model,
                 "time_seconds": round(t_elapsed, 1),
-                "signals": {k: {"source": v.get("source", "unknown"), "flags": v.get("flags", [])} for k, v in model_signals.items()},
+                "total_pages": num_pages,
+                "signals": {k: {**{"source": v.get("source", "unknown"), "flags": v.get("flags", []), "page": v.get("page", 1)}, **({kk: vv for kk, vv in v.items() if kk not in ("source", "flags", "page")})} for k, v in model_signals.items()},
                 "flagged_fields": flagged_fields,
                 "auto_flagged_count": len(flagged_fields),
                 "validation_errors": validation_errors,
@@ -464,7 +635,7 @@ async def extract_fields(
         return ExtractionResponse(
             success=True,
             data=response_data,
-            message=f"Extracted {len(results)} fields in {t_elapsed:.1f}s" + 
+            message=f"Extracted {len(results)} fields from {num_pages} page(s) in {t_elapsed:.1f}s" + 
                     (f" ({len(flagged_fields)} flagged for review)" if flagged_fields else "")
         )
         
@@ -490,20 +661,32 @@ async def auto_find_fields(file: UploadFile = File(...)):
             raise HTTPException(status_code=503, detail="Qwen2-VL model not available")
         
         print(f"📄 Auto-detecting fields in: {file.filename}")
-        images, _ = process_pdf(pdf_bytes)
+        try:
+            enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         
-        if not images:
+        if not enhanced_images:
             raise HTTPException(status_code=400, detail="Could not process PDF")
         
-        image = images[0]
+        num_pages = len(enhanced_images)
         
-        # Use Qwen2-VL to detect field labels (serialized by semaphore)
+        # Detect fields from ALL pages (union, deduplicated)
         try:
             async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
                 async with _gpu_semaphore:
-                    print(f"🔒 GPU semaphore acquired for auto-detect")
+                    print(f"🔒 GPU semaphore acquired for auto-detect ({num_pages} pages)")
                     qwen = Qwen2VLExtractor()
-                    detected_fields = qwen.auto_detect_fields(image)
+                    all_fields = []
+                    seen = set()
+                    for page_idx, page_img in enumerate(enhanced_images):
+                        print(f"   📄 Page {page_idx+1}/{num_pages}: detecting fields...")
+                        page_fields = qwen.auto_detect_fields(page_img)
+                        for f in page_fields:
+                            f_lower = f.strip().lower()
+                            if f_lower not in seen:
+                                seen.add(f_lower)
+                                all_fields.append(f)
         except TimeoutError:
             print(f"⏱️ GPU busy — auto-detect timed out after {_GPU_TIMEOUT_SECONDS}s")
             raise HTTPException(
@@ -511,14 +694,14 @@ async def auto_find_fields(file: UploadFile = File(...)):
                 detail=f"GPU busy — another operation is in progress. Try again in a moment."
             )
         
-        print(f"✅ Found {len(detected_fields)} fields: {detected_fields}")
+        print(f"✅ Found {len(all_fields)} unique fields across {num_pages} page(s): {all_fields}")
         
         field_objects = [
             {"key": field, "question": f"What is the {field}?"}
-            for field in detected_fields
+            for field in all_fields
         ]
         
-        return {"success": True, "fields": field_objects, "count": len(field_objects)}
+        return {"success": True, "fields": field_objects, "count": len(field_objects), "total_pages": num_pages}
         
     except HTTPException:
         raise
@@ -546,13 +729,16 @@ async def detect_checkboxes(file: UploadFile = File(...)):
         # The image enhancer binarizes and removes borders/lines, which
         # destroys checkbox marks (✓, ✗, filled squares).
         from utils.pdf_processor import pdf_to_images
-        images = pdf_to_images(pdf_bytes)
+        raw_images = pdf_to_images(pdf_bytes)
         
-        if not images:
+        if not raw_images:
             raise HTTPException(status_code=400, detail="Could not process PDF")
         
-        image = images[0]
-        print(f"   📐 Checkbox image: {image.size[0]}x{image.size[1]} ({image.mode})")
+        if len(raw_images) > MAX_PDF_PAGES:
+            raise HTTPException(status_code=400, detail=f"PDF has {len(raw_images)} pages (max {MAX_PDF_PAGES})")
+        
+        num_pages = len(raw_images)
+        print(f"   📐 {num_pages} page(s) to scan for checkboxes")
         
         import time
         t_start = time.time()
@@ -560,9 +746,15 @@ async def detect_checkboxes(file: UploadFile = File(...)):
         try:
             async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
                 async with _gpu_semaphore:
-                    print(f"🔒 GPU semaphore acquired for checkbox detection")
+                    print(f"🔒 GPU semaphore acquired for checkbox detection ({num_pages} pages)")
                     qwen = Qwen2VLExtractor()
-                    checkboxes = qwen.extract_checkboxes(image, fields=None)
+                    all_checkboxes = []
+                    for page_idx, page_img in enumerate(raw_images):
+                        print(f"   📄 Page {page_idx+1}/{num_pages}: detecting checkboxes...")
+                        page_cbs = qwen.extract_checkboxes(page_img, fields=None)
+                        for cb in page_cbs:
+                            cb["page"] = page_idx + 1
+                        all_checkboxes.extend(page_cbs)
         except TimeoutError:
             print(f"⏱️ GPU busy — checkbox detection timed out after {_GPU_TIMEOUT_SECONDS}s")
             raise HTTPException(
@@ -572,12 +764,13 @@ async def detect_checkboxes(file: UploadFile = File(...)):
         
         t_elapsed = time.time() - t_start
         
-        print(f"✅ Found {len(checkboxes)} checkboxes in {t_elapsed:.1f}s")
+        print(f"✅ Found {len(all_checkboxes)} checkboxes across {num_pages} page(s) in {t_elapsed:.1f}s")
         
         return {
             "success": True,
-            "checkboxes": checkboxes,
-            "count": len(checkboxes),
+            "checkboxes": all_checkboxes,
+            "count": len(all_checkboxes),
+            "total_pages": num_pages,
             "time_seconds": round(t_elapsed, 1),
         }
         
@@ -615,17 +808,33 @@ async def ask_question(
         if not _qwen2vl_available:
             raise HTTPException(status_code=503, detail="Qwen2-VL not available")
         
-        # Process PDF → image (cached — avoids re-processing on every question)
-        image, _ = get_or_process_file(pdf_bytes, file.filename)
-        if not image:
+        # Process PDF → images (cached, multi-page)
+        try:
+            enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not enhanced_images:
             raise HTTPException(status_code=400, detail="Could not process PDF")
+        
+        num_pages = len(enhanced_images)
         t_start = time.time()
         
+        # Try each page sequentially until we get a real answer
         try:
             async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
                 async with _gpu_semaphore:
                     qwen = Qwen2VLExtractor()
-                    answer = qwen.ask_question(image, question.strip())
+                    answer = ""
+                    answer_page = 1
+                    for page_idx, page_img in enumerate(enhanced_images):
+                        page_answer = qwen.ask_question(page_img, question.strip())
+                        if page_answer and "NOT_FOUND_IN_DOCUMENT" not in page_answer.upper() and "NOT_DOCUMENT_RELATED" not in page_answer.upper():
+                            answer = page_answer
+                            answer_page = page_idx + 1
+                            break
+                    if not answer:
+                        # Use the last page's answer (which might be a sentinel)
+                        answer = page_answer if 'page_answer' in dir() else ""
                         
         except TimeoutError:
             raise HTTPException(
@@ -636,7 +845,7 @@ async def ask_question(
         t_elapsed = time.time() - t_start
         
         # Handle sentinel responses from the model
-        answer_type = "answer"  # normal answer
+        answer_type = "answer"
         if not answer:
             answer = "No answer found."
             answer_type = "system"
@@ -651,6 +860,8 @@ async def ask_question(
             "success": True,
             "answer": answer,
             "answer_type": answer_type,
+            "answer_page": answer_page if answer_type == "answer" else None,
+            "total_pages": num_pages,
             "time_seconds": round(t_elapsed, 1),
         }
         
@@ -686,19 +897,29 @@ async def re_extract_field(
         if not _qwen2vl_available:
             raise HTTPException(status_code=503, detail="Qwen2-VL not available")
         
-        # Process PDF → image (cached)
-        image, _ = get_or_process_file(pdf_bytes, file.filename)
-        if not image:
+        # Process PDF → images (cached, multi-page)
+        try:
+            enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not enhanced_images:
             raise HTTPException(status_code=400, detail="Could not process PDF")
         field = field_name.strip()
         t_start = time.time()
         
+        # Try each page until we find a non-empty value
         try:
             async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
                 async with _gpu_semaphore:
                     qwen = Qwen2VLExtractor()
-                    value = qwen._extract_single_field(image, field)
-                    signal = "re-extract"
+                    value = ""
+                    found_page = 1
+                    for page_idx, page_img in enumerate(enhanced_images):
+                        page_value = qwen._extract_single_field(page_img, field)
+                        if page_value and page_value.strip():
+                            value = page_value
+                            found_page = page_idx + 1
+                            break
                         
         except TimeoutError:
             raise HTTPException(
@@ -712,7 +933,8 @@ async def re_extract_field(
             "success": True,
             "field": field,
             "value": value if value else "",
-            "signal": signal,
+            "signal": "re-extract",
+            "page": found_page,
             "time_seconds": round(t_elapsed, 1),
         }
         

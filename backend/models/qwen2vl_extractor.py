@@ -1384,6 +1384,487 @@ class Qwen2VLExtractor:
     def get_last_meta(self) -> dict:
         """Return full metadata (signals + validation) from last extraction."""
         return self._last_meta
+    # ─── Table Pre-Scan ──────────────────────────────────────────────────
+    
+    def scan_table_structure(self, image: Image.Image) -> dict:
+        """
+        Lightweight VLM scan to detect if a page has a real data table.
+        
+        Returns:
+            {
+                "has_table": bool,
+                "columns": ["Col1", "Col2", ...],   # if has_table
+                "row_index": "SL."                    # row index column name
+            }
+        """
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        
+        system_prompt = "You are a document layout analyzer. Output valid JSON only."
+        
+        user_prompt = (
+            'Look at this document image. Is there a DATA TABLE — meaning a grid where '
+            'MULTIPLE ROWS have the SAME COLUMN STRUCTURE with repeated similar data '
+            '(like a list of items, transactions, or records)?\n\n'
+            'A data table has:\n'
+            '- A HEADER ROW with column titles\n'
+            '- 2 or more DATA ROWS that all share the same columns\n'
+            '- Each row represents a similar type of record\n\n'
+            'A FORM is NOT a data table. Forms have fields like name, date, address '
+            'where each row is a DIFFERENT type of information.\n\n'
+            'If there IS a data table, return JSON:\n'
+            '{"has_table": true, "columns": ["Col1", "Col2", ...], "row_index": "SL."}\n\n'
+            'If there is NO data table (only forms, labels, or sections), return:\n'
+            '{"has_table": false}'
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_prompt},
+                ],
+            }
+        ]
+        
+        try:
+            from qwen_vl_utils import process_vision_info
+            
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.device)
+            
+            print(f"   🔍 Table pre-scan...")
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=256,  # Short response expected
+                    do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                )
+            
+            input_len = inputs["input_ids"].shape[1]
+            output_ids = outputs[:, input_len:]
+            output_text = self.processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip()
+            
+            print(f"   🔍 Scan result: {output_text[:200]}")
+            
+            # Parse the result
+            parsed = self._parse_table_json(output_text)
+            if isinstance(parsed, dict) and "has_table" in parsed:
+                if parsed.get("has_table"):
+                    columns = parsed.get("columns", [])
+                    row_index = parsed.get("row_index", "")
+                    # Post-scan validation: reject if columns look like form labels
+                    if columns and self._validate_scan_columns(columns):
+                        result = {
+                            "has_table": True,
+                            "columns": columns,
+                            "row_index": str(row_index).strip(),
+                        }
+                        print(f"   🔍 ✅ Table detected: {len(columns)} columns, row_index='{row_index}'")
+                        return result
+                    else:
+                        print(f"   🔍 Scan rejected — columns look like form labels")
+                        return {"has_table": False}
+                else:
+                    print(f"   🔍 No data table found")
+                    return {"has_table": False}
+            
+            print(f"   🔍 Could not parse scan response")
+            return {"has_table": False}
+            
+        except Exception as e:
+            logger.error(f"Table scan failed: {e}")
+            print(f"   ❌ Table scan error: {e}")
+            return {"has_table": False}
+    
+    def _validate_scan_columns(self, columns: list) -> bool:
+        """
+        Validate that detected columns look like real table headers, not form labels.
+        
+        Real table headers are short (SL., Price, Qty, Total).
+        Form labels are long (Unit Holder Name, Mutual Fund Name).
+        """
+        if len(columns) < 2:
+            return False
+        
+        # Average column name length — table headers are typically short
+        avg_len = sum(len(str(c)) for c in columns) / len(columns)
+        if avg_len > 25:
+            print(f"   🔍 Avg column name length {avg_len:.0f} > 25 — looks like form labels")
+            return False
+        
+        # If more than half of columns are > 30 chars, likely form labels
+        long_cols = sum(1 for c in columns if len(str(c)) > 30)
+        if long_cols > len(columns) / 2:
+            print(f"   🔍 {long_cols}/{len(columns)} columns > 30 chars — looks like form labels")
+            return False
+        
+        return True
+
+    # ─── Table Extraction ───────────────────────────────────────────────
+    
+    def _detect_table_mode(self, query: str) -> str:
+        """
+        Detect what kind of table query this is.
+        Returns: 'row' | 'table_or_column'
+        """
+        import re
+        # Row patterns: "Row 2", "#2", "Row No. 3", "SL. 3", "SL 7", "Sr. No. 5", "No. 4"
+        row_pattern = r'^(row\s*(no\.?\s*)?|#|sl\.?\s*|sr\.?\s*(no\.?\s*)?|no\.?\s*)\s*\d+$'
+        if re.match(row_pattern, query.strip(), re.IGNORECASE):
+            return 'row'
+        return 'table_or_column'
+    
+    def _extract_row_number(self, query: str) -> int:
+        """Extract the row number from a row query like 'Row 2' or '#3'."""
+        import re
+        m = re.search(r'\d+', query)
+        return int(m.group()) if m else 1
+    
+    def extract_table(self, image: Image.Image, query: str) -> tuple:
+        """
+        Extract table data from a document image.
+        
+        Three modes:
+          - Table name → full table as array of row objects
+          - Column heading → array of column values
+          - Row reference → single row as object
+        
+        Args:
+            image: Document page image (PIL RGB)
+            query: The field name (table name, column heading, or "Row N")
+            
+        Returns:
+            (data, table_type) where:
+              - data: parsed result (list of dicts, list of values, or dict)
+              - table_type: "table" | "column" | "row" | None (if not a table)
+        """
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        
+        mode = self._detect_table_mode(query)
+        
+        if mode == 'row':
+            row_num = self._extract_row_number(query)
+            return self._extract_table_row(image, row_num)
+        else:
+            return self._extract_table_or_column(image, query)
+    
+    def _extract_table_or_column(self, image: Image.Image, query: str) -> tuple:
+        """Try to extract a full table or a specific column."""
+        
+        query_lower = query.strip().lower()
+        is_table_query = "table" in query_lower
+        
+        system_prompt = (
+            "You are a document table extraction engine. "
+            "Extract ONLY from real data tables (grids with column headers or numbered rows, 2+ data rows, 2+ columns). "
+            "Do NOT extract from form fields, section borders, or label-value pairs. "
+            "Output valid JSON only."
+        )
+        
+        if is_table_query:
+            # User wants the whole table — find any/all data tables
+            user_prompt = (
+                f'Look at this document and find the data table.\n'
+                f'A data table is a grid with column headers and multiple data rows.\n\n'
+                f'Return ALL rows of the table as a JSON array of objects.\n'
+                f'Each object should use the column headers as keys.\n'
+                f'Example: [{{"SL": "1", "Description": "Item A", "Price": "$10", "Qty": "2", "Total": "$20"}}, '
+                f'{{"SL": "2", "Description": "Item B", "Price": "$15", "Qty": "1", "Total": "$15"}}]\n\n'
+                f'If there is no data table in this document, return exactly: NOT_A_TABLE'
+            )
+        else:
+            # User specified a column heading — extract that column
+            user_prompt = (
+                f'Look at this document and find a table column with a heading that matches or is similar to "{query}".\n\n'
+                f'If you find a matching column heading in a data table:\n'
+                f'  Return ALL values in that column as a JSON array of strings.\n'
+                f'  Example: ["value1", "value2", "value3"]\n\n'
+                f'If "{query}" is not a column heading in any table, return exactly: NOT_A_TABLE'
+            )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_prompt},
+                ],
+            }
+        ]
+        
+        try:
+            from qwen_vl_utils import process_vision_info
+            
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.device)
+            
+            print(f"   📊 Table extraction: querying '{query}'...")
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=2048,  # Tables can be large
+                    do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                )
+            
+            input_len = inputs["input_ids"].shape[1]
+            output_ids = outputs[:, input_len:]
+            output_text = self.processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip()
+            
+            print(f"   📊 Table raw output ({len(output_text)} chars): {output_text[:300]}")
+            
+            # Check for explicit "not a table" response
+            if "NOT_A_TABLE" in output_text.upper():
+                print(f"   📊 VLM says '{query}' is not a table")
+                return None, None
+            
+            # Parse the JSON output
+            parsed = self._parse_table_json(output_text)
+            if parsed is None:
+                return None, None
+            
+            # Determine type and validate
+            if isinstance(parsed, list) and len(parsed) > 0:
+                if isinstance(parsed[0], dict):
+                    # Array of row objects → full table
+                    if not self._validate_table(parsed):
+                        print(f"   📊 Table validation failed — not a real table")
+                        return None, None
+                    print(f"   📊 ✅ Table extracted: {len(parsed)} rows, {len(parsed[0])} columns")
+                    return parsed, "table"
+                elif isinstance(parsed[0], str):
+                    # Array of strings → column values
+                    if len(parsed) < 2:
+                        print(f"   📊 Column has < 2 values — rejected")
+                        return None, None
+                    print(f"   📊 ✅ Column extracted: {len(parsed)} values")
+                    return parsed, "column"
+            
+            return None, None
+            
+        except Exception as e:
+            logger.error(f"Table extraction failed: {e}")
+            print(f"   ❌ Table extraction error: {e}")
+            return None, None
+    
+    def _extract_table_row(self, image: Image.Image, row_num: int) -> tuple:
+        """Extract a specific row from a table."""
+        
+        system_prompt = (
+            "You are a document table extraction engine. "
+            "Output valid JSON only."
+        )
+        
+        user_prompt = (
+            f"Find a data table in this document and extract row number {row_num}.\n"
+            f"Return the row as a JSON object where keys are the column headers.\n"
+            f'Example: {{"Sr.No": "{row_num}", "Name": "Alice", "Amount": "500"}}\n'
+            f"If no table is found or row {row_num} doesn't exist, return: NOT_A_TABLE"
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_prompt},
+                ],
+            }
+        ]
+        
+        try:
+            from qwen_vl_utils import process_vision_info
+            
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.device)
+            
+            print(f"   📊 Row extraction: querying row {row_num}...")
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                )
+            
+            input_len = inputs["input_ids"].shape[1]
+            output_ids = outputs[:, input_len:]
+            output_text = self.processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip()
+            
+            print(f"   📊 Row raw output: {output_text[:300]}")
+            
+            if "NOT_A_TABLE" in output_text.upper():
+                return None, None
+            
+            parsed = self._parse_table_json(output_text)
+            if isinstance(parsed, dict) and len(parsed) >= 2:
+                print(f"   📊 ✅ Row {row_num} extracted: {len(parsed)} columns")
+                return parsed, "row"
+            
+            return None, None
+            
+        except Exception as e:
+            logger.error(f"Row extraction failed: {e}")
+            print(f"   ❌ Row extraction error: {e}")
+            return None, None
+    
+    def _parse_table_json(self, output_text: str):
+        """Parse JSON from table extraction output. Returns parsed data or None."""
+        import re
+        
+        def _try_parse(text):
+            """Try JSON parse, and if it fails, try fixing Python dict syntax."""
+            # Direct JSON
+            try:
+                return json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            # Python dict → JSON: single quotes → double quotes, booleans
+            try:
+                fixed = text.replace("'", '"')
+                fixed = fixed.replace("True", "true").replace("False", "false").replace("None", "null")
+                return json.loads(fixed)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            return None
+        
+        # Try direct parse
+        result = _try_parse(output_text)
+        if result is not None:
+            return result
+        
+        # Try markdown code block
+        json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', output_text, re.DOTALL)
+        if json_match:
+            result = _try_parse(json_match.group(1))
+            if result is not None:
+                return result
+        
+        # Try finding JSON array or object
+        bracket_match = re.search(r'[\[{].*[\]}]', output_text, re.DOTALL)
+        if bracket_match:
+            result = _try_parse(bracket_match.group(0))
+            if result is not None:
+                return result
+        
+        return None
+    
+    def _validate_table(self, rows: List[dict]) -> bool:
+        """
+        Validate that parsed rows are a real data table, not form layout.
+        
+        A real table needs:
+          - 2+ rows
+          - 2+ columns
+          - EITHER: first row keys look like headers (text labels)
+          - OR: first column values have sequential numbering
+        """
+        import re
+        
+        if len(rows) < 2:
+            return False
+        
+        # Check column count
+        col_counts = [len(r) for r in rows]
+        if max(col_counts) < 2:
+            return False
+        
+        # Get first column values (first key's values across rows)
+        first_key = list(rows[0].keys())[0] if rows[0] else None
+        if not first_key:
+            return False
+        
+        first_col_values = [str(r.get(first_key, "")).strip() for r in rows]
+        
+        # Check for sequential numbering in first column
+        has_numbering = self._has_sequential_numbering(first_col_values)
+        
+        # Check for proper column headers (keys are text labels, not numbers)
+        keys = list(rows[0].keys())
+        has_headers = any(
+            not k.replace(" ", "").replace(".", "").replace("#", "").isdigit()
+            for k in keys
+        )
+        
+        if has_numbering or has_headers:
+            return True
+        
+        print(f"   📊 Validation: no headers and no row numbering — rejected")
+        return False
+    
+    def _has_sequential_numbering(self, values: List[str]) -> bool:
+        """Check if values look like sequential row numbers."""
+        import re
+        
+        # Extract numeric parts
+        nums = []
+        for v in values:
+            # Match patterns: "1", "No.1", "No 1", "#1", "Pos 1", "Sr. No. 1", etc.
+            m = re.search(r'\d+', v)
+            if m:
+                nums.append(int(m.group()))
+        
+        if len(nums) < 2:
+            return False
+        
+        # Check if roughly sequential (allows gaps but must be increasing)
+        is_sequential = all(nums[i] < nums[i+1] for i in range(len(nums)-1))
+        # Also check simple 1,2,3... pattern
+        is_simple_seq = nums == list(range(nums[0], nums[0] + len(nums)))
+        
+        return is_sequential or is_simple_seq
     
     def auto_detect_fields(self, image: Image.Image) -> List[str]:
         """
@@ -1471,11 +1952,28 @@ class Qwen2VLExtractor:
     
     def _parse_field_list(self, output_text: str) -> List[str]:
         """Parse a JSON array of field names from model output."""
+        
+        def _normalize_items(items: list) -> List[str]:
+            """Handle both plain strings and dicts (e.g. {"field_name": "Date"})."""
+            result = []
+            for f in items:
+                if not f:
+                    continue
+                if isinstance(f, dict):
+                    # Model sometimes returns [{"Field Name": "Date"}, ...] or [{"field_name": "Date"}, ...]
+                    # Extract the first value from the dict
+                    vals = list(f.values())
+                    if vals and isinstance(vals[0], str) and vals[0].strip():
+                        result.append(vals[0].strip())
+                elif isinstance(f, str) and f.strip():
+                    result.append(f.strip())
+            return result
+        
         # Try direct JSON parse
         try:
-            result = json.loads(output_text)
-            if isinstance(result, list):
-                return [str(f).strip() for f in result if f]
+            parsed = json.loads(output_text)
+            if isinstance(parsed, list):
+                return _normalize_items(parsed)
         except json.JSONDecodeError:
             pass
         
@@ -1483,9 +1981,9 @@ class Qwen2VLExtractor:
         json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', output_text, re.DOTALL)
         if json_match:
             try:
-                result = json.loads(json_match.group(1))
-                if isinstance(result, list):
-                    return [str(f).strip() for f in result if f]
+                parsed = json.loads(json_match.group(1))
+                if isinstance(parsed, list):
+                    return _normalize_items(parsed)
             except json.JSONDecodeError:
                 pass
         
@@ -1493,9 +1991,9 @@ class Qwen2VLExtractor:
         bracket_match = re.search(r'\[.*?\]', output_text, re.DOTALL)
         if bracket_match:
             try:
-                result = json.loads(bracket_match.group(0))
-                if isinstance(result, list):
-                    return [str(f).strip() for f in result if f]
+                parsed = json.loads(bracket_match.group(0))
+                if isinstance(parsed, list):
+                    return _normalize_items(parsed)
             except json.JSONDecodeError:
                 pass
         

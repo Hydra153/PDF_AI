@@ -13,6 +13,7 @@ import { createChat } from "../components/chat.js";
 import {
   extractLayoutFromPDF,
   pdfPageToImage,
+  getPdfPageCount,
 } from "../services/pdf_helpers.js";
 
 // Fields to Extract (starts empty - use Auto-Find or add manually)
@@ -94,7 +95,7 @@ function renderApp() {
                 <div id="presets-dropdown" class="presets-dropdown" style="display:none;"></div>
               </div>
           </div>
-          <div id="voting-option" style="margin-top: 12px; padding: 6px 12px; background: rgba(74, 144, 226, 0.04); border: 1px solid rgba(74, 144, 226, 0.12); border-radius: 8px; width: fit-content;">
+          <div id="voting-option" style="margin-top: 12px; padding: 6px 12px; background: rgba(74, 144, 226, 0.04); border: 1px solid rgba(74, 144, 226, 0.12); border-radius: 8px; width: fit-content; display: flex; gap: 16px; align-items: center;">
             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
               <input type="checkbox" id="voting-checkbox" style="accent-color: #4a90e2; width: 16px; height: 16px;" />
               <span style="font-weight: 500; font-size: 13px;">Accuracy Boost</span>
@@ -102,6 +103,10 @@ function renderApp() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
                 <span class="info-tooltip-text">3× voting passes — slower but more accurate</span>
               </span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; opacity: 0.7;">
+              <input type="checkbox" id="raw-mode-checkbox" style="accent-color: #e67e22; width: 14px; height: 14px;" />
+              <span style="font-weight: 500; font-size: 11px; color: #e67e22;">🔧 Raw Image (Dev)</span>
             </label>
           </div>
           <div class="actions" style="margin-top: 12px;">
@@ -140,11 +145,16 @@ function renderApp() {
 
       <section class="panel">
         <label class="label">Document Preview</label>
-        <div id="layout-preview-container" style="margin-top: 16px; background: #fff; padding: 20px; border-radius: 8px;">
+        <div id="layout-preview-container" style="margin-top: 16px; background: #fff; padding: 20px; border-radius: 8px; position: relative;">
             <div id="no-preview" style="text-align: center; padding: 40px; color: #999;">
                 No Preview
             </div>
             <img id="pdf-preview-img" style="display: none; max-width: 100%; border: 2px solid #3498db; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" alt="Document Preview" />
+            <div id="page-nav" style="display: none; margin-top: 10px; display: none; align-items: center; justify-content: center; gap: 12px; padding: 8px 0;">
+              <button id="prev-page-btn" class="btn-secondary" style="padding: 4px 14px; font-size: 0.85rem; border-radius: 6px; min-width: 36px;" disabled>←</button>
+              <span id="page-indicator" style="font-size: 0.82rem; color: var(--text-muted, #64748b); user-select: none;">Page 1 of 1</span>
+              <button id="next-page-btn" class="btn-secondary" style="padding: 4px 14px; font-size: 0.85rem; border-radius: 6px; min-width: 36px;" disabled>→</button>
+            </div>
         </div>
       </section>
       </div><!-- End Extract View -->
@@ -182,6 +192,8 @@ function renderApp() {
   let selectedFile = null;
   let lastCheckboxResults = null;  // Store for JSON export
   let checkboxEnabled = true;  // Checkbox detection always on
+  let currentPage = 1;         // Current preview page (1-based)
+  let totalPageCount = 1;      // Total pages in current document
 
   // Tab Navigation (Extract / Review)
   const tabExtract = document.getElementById("tab-extract");
@@ -866,40 +878,86 @@ function renderApp() {
   }
 
 
-  // Render Document Preview (simple PDF page image)
-  async function renderLayoutPreview() {
+  // Render Document Preview (with multi-page navigation)
+  async function renderLayoutPreview(pageNum = 1) {
     const previewImg = document.getElementById("pdf-preview-img");
+    const pageNav = document.getElementById("page-nav");
+    const pageIndicator = document.getElementById("page-indicator");
+    const prevBtn = document.getElementById("prev-page-btn");
+    const nextBtn = document.getElementById("next-page-btn");
+
     if (!selectedFile) {
       console.log("No file selected for preview");
       noPreview.style.display = "block";
       previewImg.style.display = "none";
+      if (pageNav) pageNav.style.display = "none";
       return;
     }
 
     try {
-      console.log("Rendering document preview...");
+      console.log(`Rendering document preview (page ${pageNum})...`);
       noPreview.style.display = "none";
 
       if (isImageFile(selectedFile)) {
-        // Image file — show directly via object URL
+        // Image file — show directly via object URL (single page)
         const imageUrl = URL.createObjectURL(selectedFile);
         previewImg.src = imageUrl;
         previewImg.onload = () => URL.revokeObjectURL(imageUrl);
+        totalPageCount = 1;
+        currentPage = 1;
+        if (pageNav) pageNav.style.display = "none";
       } else {
-        // PDF file — render via PDF.js
-        const imageDataUrl = await pdfPageToImage(selectedFile, 1, 2.0);
+        // PDF file — get page count and render requested page
+        if (pageNum === 1) {
+          totalPageCount = await getPdfPageCount(selectedFile);
+        }
+        currentPage = Math.max(1, Math.min(pageNum, totalPageCount));
+        const imageDataUrl = await pdfPageToImage(selectedFile, currentPage, 2.0);
         previewImg.src = imageDataUrl;
+
+        // Show/hide page nav
+        if (totalPageCount > 1 && pageNav) {
+          pageNav.style.display = "flex";
+          pageIndicator.textContent = `Page ${currentPage} of ${totalPageCount}`;
+          prevBtn.disabled = currentPage <= 1;
+          nextBtn.disabled = currentPage >= totalPageCount;
+        } else if (pageNav) {
+          pageNav.style.display = "none";
+        }
       }
       previewImg.style.display = "block";
 
-      console.log("Document preview rendered");
+      console.log(`Document preview rendered (page ${currentPage}/${totalPageCount})`);
     } catch (err) {
       console.error("✗ Preview error:", err);
       noPreview.style.display = "block";
       noPreview.textContent = `Error: ${err.message}`;
       previewImg.style.display = "none";
+      if (pageNav) pageNav.style.display = "none";
     }
   }
+
+  // Page navigation event handlers
+  document.getElementById("prev-page-btn")?.addEventListener("click", () => {
+    if (currentPage > 1) renderLayoutPreview(currentPage - 1);
+  });
+  document.getElementById("next-page-btn")?.addEventListener("click", () => {
+    if (currentPage < totalPageCount) renderLayoutPreview(currentPage + 1);
+  });
+
+  // Keyboard shortcuts for page navigation (← →)
+  document.addEventListener("keydown", (e) => {
+    // Don't interfere with input fields
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    if (totalPageCount <= 1) return;
+    if (e.key === "ArrowLeft" && currentPage > 1) {
+      e.preventDefault();
+      renderLayoutPreview(currentPage - 1);
+    } else if (e.key === "ArrowRight" && currentPage < totalPageCount) {
+      e.preventDefault();
+      renderLayoutPreview(currentPage + 1);
+    }
+  });
 
   // Extract Button Handler
   extractBtn.addEventListener("click", async () => {
@@ -931,15 +989,17 @@ function renderApp() {
         ? "Extracting with Qwen2.5-VL (3× accuracy boost)..."
         : "Extracting with Qwen2.5-VL...";
 
-      const extractedData = await extractFields(selectedFile, CURRENT_FIELDS, "qwen", votingRounds, checkboxEnabled);
+      const rawModeChecked = document.getElementById("raw-mode-checkbox")?.checked;
+      const extractedData = await extractFields(selectedFile, CURRENT_FIELDS, "qwen", votingRounds, checkboxEnabled, rawModeChecked);
 
       console.log("--- QWEN OUTPUT (JSON) ---");
       console.log(JSON.stringify(extractedData, null, 2));
       console.log("------------------------------");
 
       const timeSec = extractedData?._meta?.time_seconds;
+      const totalPages = extractedData?._meta?.total_pages || 1;
       renderResults(resultsContainer, extractedData);
-      statusEl.textContent = `Extraction complete!${timeSec ? ` (${timeSec}s)` : ""}`;
+      statusEl.textContent = `Extraction complete!${timeSec ? ` (${timeSec}s` : ""}${totalPages > 1 ? `, ${totalPages} pages` : ""}${timeSec ? ")" : ""}`;
       updateStatus("ready");
     } catch (err) {
       console.error("Extraction error:", err);
@@ -1003,6 +1063,48 @@ function renderApp() {
   // Current extraction data (for JSON display)
   let currentExtractionData = {};
 
+  // ─── Table Value Renderer ───
+  function renderTableValue(jsonStr, tableType) {
+    try {
+      const data = JSON.parse(jsonStr);
+
+      if (tableType === "table" && Array.isArray(data) && data.length > 0 && typeof data[0] === "object") {
+        const headers = Object.keys(data[0]);
+        let t = `<div class="table-value-wrap"><table class="mini-table"><thead><tr>`;
+        headers.forEach(h => { t += `<th>${h}</th>`; });
+        t += `</tr></thead><tbody>`;
+        data.forEach(row => {
+          t += `<tr>`;
+          headers.forEach(h => { t += `<td>${row[h] ?? ""}</td>`; });
+          t += `</tr>`;
+        });
+        t += `</tbody></table></div>`;
+        return t;
+      }
+
+      if (tableType === "column" && Array.isArray(data)) {
+        let t = `<div class="table-value-wrap"><table class="mini-table"><tbody>`;
+        data.forEach((v, i) => { t += `<tr><td class="row-idx">${i + 1}</td><td>${v}</td></tr>`; });
+        t += `</tbody></table></div>`;
+        return t;
+      }
+
+      if (tableType === "row" && typeof data === "object" && !Array.isArray(data)) {
+        const keys = Object.keys(data);
+        let t = `<div class="table-value-wrap"><table class="mini-table"><thead><tr>`;
+        keys.forEach(k => { t += `<th>${k}</th>`; });
+        t += `</tr></thead><tbody><tr>`;
+        keys.forEach(k => { t += `<td>${data[k] ?? ""}</td>`; });
+        t += `</tr></tbody></table></div>`;
+        return t;
+      }
+    } catch (e) {
+      // Not valid JSON — fall through
+    }
+    // Fallback: show raw value
+    return `<div class="field-value">${jsonStr}</div>`;
+  }
+
   function renderResults(container, data) {
     currentExtractionData = { ...data };
 
@@ -1021,6 +1123,7 @@ function renderApp() {
     const normalizedValues = meta.normalized_values || {};
     const metaSignals = meta.signals || {};
     const flaggedFields = meta.flagged_fields || [];
+    const totalPages = meta.total_pages || 1;
     const hasNormalized = Object.keys(normalizedValues).length > 0;
 
     // Track format state
@@ -1059,10 +1162,12 @@ function renderApp() {
       // Source badge icon mapping
       const sourceIcons = {
         batch: "⚡", fallback: "🔍", voting: "🗳️", paddleocr: "📄",
-        checkbox_batch: "☑", checkbox_vqa: "🔍", unknown: "❓",
+        checkbox_batch: "☑", checkbox_vqa: "🔍", table: "📊", unknown: "❓",
       };
       const sourceIcon = sourceIcons[source] || "";
       const sourceBadge = source ? `<span class="signal-badge">${sourceIcon} ${source}</span>` : "";
+      const fieldPage = fieldSignal.page || 1;
+      const pageBadge = totalPages > 1 ? `<span class="signal-badge" style="opacity:0.7;" title="Found on page ${fieldPage}">pg ${fieldPage}</span>` : "";
       
       // Flag pills
       const flagPills = flags.map(f => {
@@ -1081,14 +1186,25 @@ function renderApp() {
         ? `<span class="format-indicator" style="display: none; font-size: 0.65rem; color: var(--accent, #6366f1); margin-left: 6px; opacity: 0.7;" title="Formatted by validator">${icons.sparkle(11)}</span>`
         : "";
 
+      // ─── Table rendering ───
+      const tableType = fieldSignal.type; // "table" | "column" | "row" | undefined
+      let valueHtml;
+      let isTableField = false;
+      if (tableType && (tableType === "table" || tableType === "column" || tableType === "row")) {
+        isTableField = true;
+        valueHtml = renderTableValue(value, tableType);
+      } else {
+        valueHtml = `<div class="field-value">${displayValue}</div>`;
+      }
+
       html += `
-        <div class="result-card animate-fadeUp${isFlagged ? ' flagged' : ''}" data-field="${key}" data-raw="${safeValue}" data-normalized="${hasFormat ? normalizedVal : safeValue}" style="animation-delay: ${idx * 0.03}s;">
+        <div class="result-card animate-fadeUp${isFlagged ? ' flagged' : ''}${isTableField ? ' table-card' : ''}" data-field="${key}" data-raw="${safeValue}" data-normalized="${hasFormat ? normalizedVal : safeValue}" style="animation-delay: ${idx * 0.03}s;">
           <div class="card-header">
             <span class="field-name">${key}${formatIndicator}</span>
-            ${sourceBadge}
+            ${pageBadge}${sourceBadge}
           </div>
           ${flagPills ? `<div class="flag-pills">${flagPills}</div>` : ""}
-          <div class="field-value">${displayValue}</div>
+          ${valueHtml}
           <div class="card-footer">
             <button class="btn-icon btn-resend" data-field="${key}" title="Re-extract">${icons.refreshCw(14)}</button>
             <button class="btn-icon btn-flag" data-field="${key}" data-value="${safeValue}" data-signal="${source || 'manual_flag'}" title="Flag for review">${icons.alertCircle(14)}</button>

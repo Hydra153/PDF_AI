@@ -88,3 +88,14 @@ export async function pdfPageToImage(file, pageNum = 1, scale = 1.5) {
 
   return canvas.toDataURL("image/png");
 }
+
+/**
+ * Get total page count of a PDF file.
+ * @param {File} file - PDF file object
+ * @returns {Promise<number>} Number of pages
+ */
+export async function getPdfPageCount(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  return pdf.numPages;
+}

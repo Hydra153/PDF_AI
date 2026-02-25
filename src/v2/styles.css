@@ -106,6 +106,266 @@ body.dark .chat-bubble.ai .chat-bubble-text {
   border-color: rgba(78, 204, 163, 0.15);
 }
 
+/* Dark mode: Buttons */
+body.dark button {
+  color: var(--fg);
+}
+
+body.dark #upload-btn {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+body.dark #add-field-btn {
+  background: var(--fg) !important;
+  color: var(--bg) !important;
+}
+
+body.dark .presets-btn {
+  background: var(--accent) !important;
+  color: #fff !important;
+}
+
+body.dark #extract-btn {
+  background: var(--accent) !important;
+  color: #fff !important;
+}
+
+body.dark #extract-btn:disabled {
+  opacity: 0.4;
+}
+
+body.dark .btn-secondary {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: var(--fg) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+body.dark .btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.12) !important;
+}
+
+/* Dark mode: Field tags */
+body.dark .field-tag {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+body.dark .field-tag:hover {
+  background: rgba(255, 80, 80, 0.15);
+  border-color: rgba(255, 80, 80, 0.3);
+}
+
+/* Dark mode: Presets dropdown */
+body.dark .presets-dropdown {
+  background: #1e1e24 !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+}
+
+body.dark .presets-dropdown * {
+  color: var(--fg) !important;
+}
+
+body.dark .presets-dropdown button {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+body.dark .presets-dropdown button:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+}
+
+body.dark .presets-dropdown input {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  color: var(--fg) !important;
+}
+
+/* Dark mode: Result / extraction cards */
+body.dark .results-grid > div {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: var(--fg);
+}
+
+body.dark .results-grid > div:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+body.dark .results-grid .result-label,
+body.dark .results-grid label {
+  color: var(--muted) !important;
+}
+
+body.dark .results-grid .result-value,
+body.dark .results-grid p,
+body.dark .results-grid span {
+  color: var(--fg);
+}
+
+/* Dark mode: Batch badge */
+body.dark [style*="background: #e8f5e9"],
+body.dark [style*="background: #fff3e0"] {
+  background: rgba(78, 204, 163, 0.12) !important;
+  color: var(--accent) !important;
+}
+
+/* Dark mode: Card action buttons (resend, copy, delete) */
+body.dark .results-grid button {
+  color: var(--muted);
+}
+
+body.dark .results-grid button:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Dark mode: Checkbox result cards */
+body.dark .cb-card {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  color: var(--fg) !important;
+}
+
+body.dark .cb-card * {
+  color: var(--fg) !important;
+}
+
+/* Dark mode: Status text / labels */
+body.dark .label {
+  color: var(--accent);
+}
+
+body.dark .status {
+  color: var(--accent);
+}
+
+body.dark [data-status] {
+  color: var(--accent);
+}
+
+/* Dark mode: Upload area */
+body.dark .upload-area {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+body.dark .upload-area p {
+  color: var(--muted);
+}
+
+/* Dark mode: Voting option (Accuracy Boost) */
+body.dark #voting-option {
+  background: rgba(78, 204, 163, 0.06) !important;
+  border-color: rgba(78, 204, 163, 0.15) !important;
+}
+
+/* Dark mode: Info tooltip */
+body.dark .info-tooltip-text {
+  background: #2a2a32;
+}
+
+body.dark .info-tooltip-text::after {
+  border-top-color: #2a2a32;
+}
+
+/* Dark mode: Chat suggestions */
+body.dark .chat-suggestion-chip {
+  background: rgba(78, 204, 163, 0.08);
+  border-color: rgba(78, 204, 163, 0.18);
+  color: var(--fg);
+}
+
+body.dark .chat-suggestion-chip:hover {
+  background: rgba(78, 204, 163, 0.15);
+  border-color: rgba(78, 204, 163, 0.3);
+}
+
+/* Dark mode: Chat send button */
+body.dark .chat-send-btn {
+  background: var(--accent);
+}
+
+/* Dark mode: Chat close/pin buttons */
+body.dark .chat-close-btn,
+body.dark .chat-pin-btn {
+  color: var(--muted);
+}
+
+body.dark .chat-close-btn:hover,
+body.dark .chat-pin-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg);
+}
+
+body.dark .chat-pin-btn.pinned {
+  color: var(--accent);
+  background: rgba(78, 204, 163, 0.12);
+}
+
+/* Dark mode: Extract tabs background */
+body.dark .extract-tabs {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Dark mode: Scrollbar */
+body.dark ::-webkit-scrollbar {
+  width: 6px;
+}
+
+body.dark ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+body.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+/* Dark mode: Header nav hover */
+body.dark .rd-nav-btn:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.06) !important;
+}
+
+/* Dark mode: Extract tab hover */
+body.dark .extract-tab:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.06) !important;
+}
+
+/* Dark mode: Document preview */
+body.dark #layout-preview-container {
+  background: #1a1a20 !important;
+}
+
+/* Dark mode: Panel box-shadow */
+body.dark .panel {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Dark mode: Chat empty state */
+body.dark .chat-empty {
+  color: var(--muted);
+}
+
+body.dark .chat-empty p {
+  color: var(--fg);
+}
+
+/* Dark mode: Chat disclaimer */
+body.dark .chat-disclaimer {
+  color: var(--muted);
+}
+
+/* Dark mode: General text color fixes */
+body.dark p,
+body.dark span,
+body.dark label,
+body.dark small {
+  color: var(--fg);
+}
+
 /* ─── Theme Toggle ─── */
 .theme-toggle {
   background: none;
@@ -1318,6 +1578,8 @@ button.hoverable:active {
   font-weight: 500;
   word-break: break-word;
   min-height: 1.4em;
+  max-height: 120px;
+  overflow-y: auto;
 }
 
 .card-footer {
@@ -2297,4 +2559,93 @@ body.chat-open .rd-header {
 
 #rd-status-label {
   transition: color 0.3s ease;
+}
+
+/* ─── Table Extraction Cards ─── */
+.table-card {
+  flex: 1 1 100% !important;
+  max-width: 100%;
+}
+
+.result-card {
+  align-self: flex-start;
+}
+
+.table-value-wrap {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 220px;
+  margin: 4px 0;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.76rem;
+  font-family: "JetBrains Mono", monospace;
+  white-space: nowrap;
+}
+
+.mini-table th {
+  background: #f0ece4;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 6px 10px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--muted, #64748b);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.06);
+}
+
+.mini-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  color: var(--fg, #1e293b);
+}
+
+.mini-table tbody tr:nth-child(even) {
+  background: rgba(0, 0, 0, 0.015);
+}
+
+.mini-table tbody tr:hover {
+  background: rgba(99, 102, 241, 0.04);
+}
+
+.mini-table .row-idx {
+  color: var(--muted, #94a3b8);
+  font-size: 0.68rem;
+  width: 28px;
+  text-align: center;
+}
+
+/* Dark mode table */
+body.dark .table-value-wrap {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+body.dark .mini-table th {
+  background: #1e1e22;
+  color: var(--muted);
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+body.dark .mini-table td {
+  color: var(--fg);
+  border-bottom-color: rgba(255, 255, 255, 0.04);
+}
+
+body.dark .mini-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+body.dark .mini-table tbody tr:hover {
+  background: rgba(99, 102, 241, 0.08);
 }

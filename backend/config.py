@@ -99,6 +99,7 @@ CORS_ORIGINS = [
 
 # Upload settings
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_PDF_PAGES = 50                # Max pages to process per PDF
 ALLOWED_EXTENSIONS = {".pdf"}
 
 # ─── Image Enhancement for Scanned PDFs ───
