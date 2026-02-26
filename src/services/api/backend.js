@@ -167,6 +167,40 @@ export function detectCheckboxes(file) {
 }
 
 /**
+ * Scan all pages for data tables using VLM pre-scan
+ * @param {File} file - PDF file
+ * @returns {Object} {tables: [{page, columns, row_index_prefix, column_count}], count, total_pages, time_seconds}
+ */
+export function findTables(file) {
+  return withLock(async () => {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch(`${BACKEND_URL}/api/find-tables`, {
+        method: "POST",
+        body: formData,
+        signal: AbortSignal.timeout(API_TIMEOUT),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || "Table scan failed");
+      }
+
+      const result = await response.json();
+      if (!result.success) throw new Error("Table scan failed");
+      return result;
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error("Request timeout - document too large or backend slow");
+      }
+      throw err;
+    }
+  });
+}
+
+/**
  * Ask a natural language question about a PDF document
  * @param {File} file - PDF file
  * @param {string} question - Question to ask

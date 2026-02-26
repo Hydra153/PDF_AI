@@ -5,6 +5,7 @@ import {
   autoFindFields as autoFindFieldsAPI,
   checkBackendHealth,
   detectCheckboxes,
+  findTables,
   askQuestion,
   reExtractField,
 } from "../services/api/backend.js";
@@ -79,6 +80,7 @@ function renderApp() {
       <nav class="extract-tabs">
         <button class="extract-tab active" data-tab="fields">${icons.clipboard(14)} Fields</button>
         <button class="extract-tab" data-tab="checkboxes">${icons.checkCircle(14)} Checkboxes</button>
+        <button class="extract-tab" data-tab="tables">${icons.table ? icons.table(14) : '⊞'} Tables</button>
       </nav>
 
       <!-- Fields Tab Content -->
@@ -141,6 +143,20 @@ function renderApp() {
         </section>
       </div>
 
+      <!-- Tables Tab Content -->
+      <div id="tab-content-tables" class="extract-tab-content" style="display: none;">
+        <section class="panel" style="box-shadow: none;">
+          <label class="label">Table Detection</label>
+          <p style="font-size: 0.8rem; color: var(--muted); margin: 0 0 12px 0;">Scan all pages and detect data tables — shows column headers and row structure</p>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button id="find-tables-btn" disabled style="background: #16a085; color: white; border: none; padding: 10px 18px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 6px; transition: all 0.2s;">⊞ Find All Tables</button>
+          </div>
+        </section>
+        <section class="panel" style="box-shadow: none;">
+          <div id="table-scan-results-container"></div>
+        </section>
+      </div>
+
       </div>
 
       <section class="panel">
@@ -191,6 +207,7 @@ function renderApp() {
 
   let selectedFile = null;
   let lastCheckboxResults = null;  // Store for JSON export
+  let lastTableResults = null;     // Store for table JSON export
   let checkboxEnabled = true;  // Checkbox detection always on
   let currentPage = 1;         // Current preview page (1-based)
   let totalPageCount = 1;      // Total pages in current document
@@ -202,12 +219,16 @@ function renderApp() {
   const viewReview = document.getElementById("view-review");
   const reviewContainer = document.getElementById("review-queue-container");
 
-  // ─── Extraction Sub-Tab Navigation (Fields / Checkboxes) ───
+  // ─── Extraction Sub-Tab Navigation (Fields / Checkboxes / Tables) ───
   const extractTabs = document.querySelectorAll(".extract-tab");
   const extractTabContents = {
     fields: document.getElementById("tab-content-fields"),
     checkboxes: document.getElementById("tab-content-checkboxes"),
+    tables: document.getElementById("tab-content-tables"),
   };
+
+  const findTablesBtn = document.getElementById("find-tables-btn");
+  const tableScanResultsContainer = document.getElementById("table-scan-results-container");
 
   extractTabs.forEach(tab => {
     tab.addEventListener("click", () => {
@@ -640,6 +661,7 @@ function renderApp() {
     extractBtn.disabled = false;
     autoFindBtn.disabled = false;
     detectCheckboxesBtn.disabled = false;
+    findTablesBtn.disabled = false;
     statusEl.textContent = "Ready to process";
 
     // Update chat with new file
@@ -651,7 +673,9 @@ function renderApp() {
     // Clear previous results
     resultsContainer.innerHTML = "";
     checkboxResultsContainer.innerHTML = "";
+    tableScanResultsContainer.innerHTML = "";
     lastCheckboxResults = null;
+    lastTableResults = null;
 
     // Clear fields from previous document
     CURRENT_FIELDS = [];
@@ -748,6 +772,201 @@ function renderApp() {
       detectCheckboxesBtn.textContent = "☑ Find All Checkboxes";
     }
   });
+
+  // ─── Find All Tables Handler ───
+  findTablesBtn.addEventListener("click", async () => {
+    if (!selectedFile) return;
+
+    try {
+      findTablesBtn.disabled = true;
+      findTablesBtn.textContent = "⏳ Scanning...";
+      statusEl.textContent = "Scanning for tables...";
+      tableScanResultsContainer.innerHTML = `
+        <div style="text-align: center; padding: 20px; color: var(--muted);">
+          <div class="spinner" style="margin: 0 auto 12px;"></div>
+          Scanning document for data tables...
+        </div>`;
+
+      const result = await findTables(selectedFile);
+
+      if (!result.tables || result.tables.length === 0) {
+        tableScanResultsContainer.innerHTML = `
+          <div style="text-align: center; padding: 20px; color: var(--muted);">
+            ⊟ No data tables found in this document
+          </div>`;
+        statusEl.textContent = "No tables found";
+        return;
+      }
+
+      renderTableScanResults(result.tables, result.total_pages, result.time_seconds);
+      lastTableResults = result.tables;
+      statusEl.textContent = `Found ${result.count} table(s) across ${result.total_pages} page(s) in ${result.time_seconds}s`;
+
+    } catch (err) {
+      console.error("Table scan error:", err);
+      tableScanResultsContainer.innerHTML = `
+        <div style="color: #ef4444; padding: 12px;">❌ ${err.message}</div>`;
+      statusEl.textContent = `Error: ${err.message}`;
+    } finally {
+      findTablesBtn.disabled = false;
+      findTablesBtn.textContent = "⊞ Find All Tables";
+    }
+  });
+
+  function renderTableScanResults(tables, totalPages, timeSec) {
+    let html = `
+      <div style="display: flex; gap: 12px; margin-bottom: 12px; font-size: 0.8rem; color: var(--muted); align-items: center; flex-wrap: wrap;">
+        <span>📊 ${tables.length} table${tables.length !== 1 ? "s" : ""} found</span>
+        <span>📄 ${totalPages} page${totalPages !== 1 ? "s" : ""} scanned</span>
+        <span style="margin-left: auto;">${timeSec}s</span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 16px;">`;
+
+    tables.forEach((t, i) => {
+      const cols = t.columns || [];
+      const rowPrefix = t.row_index_prefix || "";
+      const rowsJson = t.rows_json || null;
+
+      // ── Try to build a real data table from rows_json ──
+      // rows_json can be:
+      //   - a JS array  (FastAPI auto-serialized from Python list)
+      //   - a JSON string (if backend returned it as str)
+      //   - null  (extraction failed)
+      let tableBodyHtml = "";
+      let rowCount = 0;
+      let usedRealData = false;
+
+      if (rowsJson) {
+        try {
+          // Normalize: accept both already-parsed array and JSON string
+          const rows = Array.isArray(rowsJson)
+            ? rowsJson
+            : (typeof rowsJson === "string" ? JSON.parse(rowsJson) : null);
+
+          if (rows && Array.isArray(rows) && rows.length > 0 && typeof rows[0] === "object") {
+            const headers = Object.keys(rows[0]);
+            rowCount = rows.length;
+            usedRealData = true;
+
+            const thCells = headers.map(h => `<th>${h}</th>`).join("");
+            const dataTrs = rows.map(row => {
+              const tds = headers.map(h => `<td>${row[h] ?? ""}</td>`).join("");
+              return `<tr>${tds}</tr>`;
+            }).join("");
+
+            tableBodyHtml = `<thead><tr>${thCells}</tr></thead><tbody>${dataTrs}</tbody>`;
+          }
+        } catch (e) { /* fall through to skeleton */ }
+      }
+
+      // ── Fallback: 3-row skeleton if no real data ──
+      if (!usedRealData) {
+        const PREVIEW_ROWS = 3;
+        const thCells = cols.map(h => `<th>${h}</th>`).join("");
+        const skeletonTrs = Array.from({ length: PREVIEW_ROWS }, (_, r) => {
+          const rowNum = r + 1;
+          const tds = cols.map((col, ci) => {
+            const val = (ci === 0 && rowPrefix) ? `${rowPrefix}${rowNum}` : "—";
+            return `<td>${val}</td>`;
+          }).join("");
+          return `<tr>${tds}</tr>`;
+        }).join("");
+        tableBodyHtml = `<thead><tr>${thCells}</tr></thead><tbody>${skeletonTrs}</tbody>`;
+        rowCount = PREVIEW_ROWS;
+      }
+
+      html += `
+        <div class="result-card table-card animate-fadeUp" style="animation-delay: ${i * 0.05}s; padding: 0; overflow: hidden;">
+
+          <!-- Title Bar -->
+          <div class="card-header" style="padding: 12px 16px; border-bottom: 1px solid rgba(128,128,128,0.12);">
+            <span class="field-name" style="display: flex; align-items: center; gap: 6px;">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#16a085" stroke-width="2.2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="9" x2="9" y2="21"/></svg>
+              Table — Page ${t.page}
+            </span>
+            <span class="signal-badge" style="background: rgba(22,160,133,0.12); color: #16a085;">${cols.length} cols · ${rowCount} rows</span>
+          </div>
+
+          <!-- Full Table (real data) -->
+          <div class="table-value-wrap">
+            <table class="mini-table">
+              ${tableBodyHtml}
+            </table>
+            ${!usedRealData ? `<div style="padding: 5px 12px; font-size: 0.68rem; color: var(--muted); font-style: italic; border-top: 1px dashed rgba(128,128,128,0.1);">Skeleton preview — restart backend to extract real rows</div>` : ""}
+          </div>
+
+          <!-- Meta footer -->
+          <div style="display: flex; gap: 20px; flex-wrap: wrap; padding: 8px 14px; border-top: 1px solid rgba(128,128,128,0.1); font-size: 0.73rem; color: var(--muted);">
+            <span><strong>Page:</strong> ${t.page} of ${totalPages}</span>
+            ${rowPrefix ? `<span><strong>Row index:</strong> <code style="background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 3px;">${rowPrefix}</code></span>` : ""}
+            <span style="margin-left: auto;">${usedRealData ? "✅ Real data" : "⚠️ No rows extracted"}</span>
+          </div>
+        </div>`;
+    });
+
+    html += `
+      </div>
+      <div style="display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap;">
+        <button id="copy-table-json" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">📋 Copy JSON</button>
+        <button id="append-table-output" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">🔗 Append to Output</button>
+        <button id="download-table-json" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">⬇ Export JSON</button>
+      </div>`;
+    tableScanResultsContainer.innerHTML = html;
+
+    // ── Wire up action buttons ──
+    const getTableExportData = () => (lastTableResults || []).map(t => ({
+      page: t.page,
+      columns: t.columns,
+      row_index_prefix: t.row_index_prefix,
+      rows: Array.isArray(t.rows_json)
+        ? t.rows_json
+        : (typeof t.rows_json === "string" ? JSON.parse(t.rows_json) : []),
+    }));
+
+    // Copy JSON
+    document.getElementById("copy-table-json")?.addEventListener("click", () => {
+      const btn = document.getElementById("copy-table-json");
+      navigator.clipboard.writeText(JSON.stringify(getTableExportData(), null, 2));
+      btn.textContent = "✓ Copied!";
+      setTimeout(() => { btn.textContent = "📋 Copy JSON"; }, 2000);
+    });
+
+    // Append to Output (merge rows as named fields into main results)
+    document.getElementById("append-table-output")?.addEventListener("click", () => {
+      const btn = document.getElementById("append-table-output");
+      if (!lastTableResults || lastTableResults.length === 0) return;
+      const merged = typeof currentExtractionData !== "undefined" ? { ...currentExtractionData } : {};
+      lastTableResults.forEach((t, i) => {
+        const key = `Table ${i + 1} (Page ${t.page})`;
+        merged[key] = JSON.stringify(Array.isArray(t.rows_json) ? t.rows_json : [], null, 2);
+      });
+      currentExtractionData = merged;
+      renderResults(resultsContainer, merged);
+      // Switch to Fields tab so user sees results
+      document.querySelector(".extract-tab[data-tab='fields']")?.click();
+      btn.textContent = "✓ Appended!";
+      btn.style.background = "rgba(34, 197, 94, 0.15)";
+      btn.style.color = "#22c55e";
+      setTimeout(() => {
+        btn.textContent = "🔗 Append to Output";
+        btn.style.background = "";
+        btn.style.color = "";
+      }, 2000);
+      statusEl.textContent = `Table data appended to output`;
+    });
+
+    // Export JSON download
+    document.getElementById("download-table-json")?.addEventListener("click", () => {
+      const blob = new Blob([JSON.stringify(getTableExportData(), null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `tables_${selectedFile?.name?.replace(/\.[^.]+$/, '') || 'doc'}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
 
   function renderCheckboxResults(checkboxes, timeSec) {
     const checked = checkboxes.filter(c => c.checked).length;

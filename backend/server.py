@@ -781,6 +781,95 @@ async def detect_checkboxes(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── Find All Tables ───
+
+@app.post("/api/find-tables")
+async def find_tables(file: UploadFile = File(...)):
+    """Scan all pages and detect data tables (columns, rows) using VLM pre-scan."""
+    try:
+        if not is_supported_file(file.filename):
+            raise HTTPException(status_code=400, detail="Only PDF and image files are supported")
+        
+        pdf_bytes = await file.read()
+        if len(pdf_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+        
+        if not _qwen2vl_available:
+            raise HTTPException(status_code=503, detail="Qwen2-VL model not available")
+        
+        print(f"📊 Finding tables in: {file.filename}")
+        
+        try:
+            enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        if not enhanced_images:
+            raise HTTPException(status_code=400, detail="Could not process file")
+        
+        num_pages = len(enhanced_images)
+        
+        import time
+        t_start = time.time()
+        
+        try:
+            async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
+                async with _gpu_semaphore:
+                    print(f"🔒 GPU semaphore acquired for table scan ({num_pages} pages)")
+                    qwen = Qwen2VLExtractor()
+                    all_tables = []
+                    
+                    for page_idx, page_img in enumerate(enhanced_images):
+                        page_num = page_idx + 1
+                        print(f"   📄 Page {page_num}/{num_pages}: scanning for tables...")
+                        scan = qwen.scan_table_structure(page_img)
+                        
+                        if scan.get("has_table"):
+                            columns = scan.get("columns", [])
+                            row_prefix = scan.get("row_index", "")
+                            print(f"   ✅ Page {page_num}: found table — {len(columns)} columns, row prefix: '{row_prefix}'")
+                            
+                            # Also extract the actual table rows for display
+                            rows_json = None
+                            try:
+                                rows_data, _ = qwen._extract_table_or_column(page_img, "table")
+                                if rows_data and rows_data not in ("NOT_A_TABLE", "NOT_FOUND", ""):
+                                    rows_json = rows_data
+                                    print(f"   📊 Extracted table rows for page {page_num}")
+                            except Exception as ex:
+                                print(f"   ⚠️ Could not extract rows: {ex}")
+                            
+                            all_tables.append({
+                                "page": page_num,
+                                "columns": columns,
+                                "row_index_prefix": row_prefix,
+                                "column_count": len(columns),
+                                "rows_json": rows_json,  # The actual table data as JSON string
+                            })
+                        else:
+                            print(f"   — Page {page_num}: no data table")
+                            
+        except TimeoutError:
+            raise HTTPException(status_code=503, detail="GPU busy — try again in a moment.")
+        
+        t_elapsed = time.time() - t_start
+        print(f"✅ Found {len(all_tables)} table(s) across {num_pages} page(s) in {t_elapsed:.1f}s")
+        
+        return {
+            "success": True,
+            "tables": all_tables,
+            "count": len(all_tables),
+            "total_pages": num_pages,
+            "time_seconds": round(t_elapsed, 1),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error during table scan: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─── Document Q&A ───
 
 @app.post("/api/ask")
