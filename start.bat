@@ -1,6 +1,6 @@
 @echo off
 echo ========================================
-echo   PDF Data Extractor - Qwen2-VL
+echo   ReaDox PDF AI - Local Dev Launcher
 echo ========================================
 echo.
 

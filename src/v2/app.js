@@ -8,6 +8,8 @@ import {
   findTables,
   askQuestion,
   reExtractField,
+  classifyDocument,
+  exportCSV,
 } from "../services/api/backend.js";
 import { ReviewQueue } from "../components/review_queue.js";
 import { createChat } from "../components/chat.js";
@@ -690,40 +692,28 @@ function renderApp() {
     }
   });
 
-  // Auto-Find Fields Handler
+  // Auto-Find Fields Handler (uses VLM classification)
   autoFindBtn.addEventListener("click", async () => {
     if (!selectedFile) return;
-
     try {
-      statusEl.textContent = "Checking backend connection...";
+      statusEl.textContent = "Analyzing document...";
       autoFindBtn.disabled = true;
 
-      // Check if backend is available
       const health = await checkBackendHealth();
+      if (!health) throw new Error("Backend server not running.");
 
-      if (!health) {
-        throw new Error(
-          "Backend server not running. Please start the backend first.",
-        );
-      }
+      const result = await classifyDocument(selectedFile);
 
-      statusEl.textContent = "Analyzing document for fields...";
-
-      // Call backend API
-      const detectedFields = await autoFindFieldsAPI(selectedFile);
-
-      if (!detectedFields || detectedFields.length === 0) {
+      if (!result.success || !result.suggested_fields?.length) {
         statusEl.textContent = "No fields detected. Try manual entry.";
         autoFindBtn.disabled = false;
         return;
       }
 
-      // Replace current fields with detected fields
-      CURRENT_FIELDS = detectedFields;
+      CURRENT_FIELDS = result.suggested_fields.map(f => ({ key: f, question: "" }));
       renderFields();
 
-      statusEl.textContent = `Found ${detectedFields.length} fields! Ready to extract.`;
-      console.log("Auto-detected fields:", detectedFields);
+      statusEl.textContent = `${result.doc_type} — ${result.suggested_fields.length} fields found (${result.time_seconds}s)`;
     } catch (err) {
       console.error("Auto-find error:", err);
       statusEl.textContent = `Error: ${err.message}`;
@@ -1184,8 +1174,52 @@ function renderApp() {
     await extractWithVision();
   });
 
+  // ─── Global Keyboard Shortcuts ───
+  document.addEventListener("keydown", (e) => {
+    // Ctrl+Enter → Start extraction (works even in inputs)
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      if (selectedFile && !extractBtn.disabled) {
+        extractBtn.click();
+      }
+      return;
+    }
+
+    // Escape → Close any open dropdown/modal
+    if (e.key === "Escape") {
+      // Close presets dropdown if open
+      const dropdown = document.querySelector(".presets-dropdown");
+      if (dropdown) dropdown.style.display = "none";
+      // Close chat panel if open and not pinned
+      const chatPanel = document.querySelector(".chat-panel");
+      if (chatPanel && !chatPanel.classList.contains("pinned")) {
+        chatPanel.style.display = "none";
+      }
+      return;
+    }
+
+    // Don't fire remaining shortcuts when typing in inputs
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+
+    // Ctrl+Shift+F → Focus "Add Field" input
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "F") {
+      e.preventDefault();
+      if (newFieldInput) newFieldInput.focus();
+      return;
+    }
+
+    // Ctrl+Shift+Q → Focus chat input
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "Q") {
+      e.preventDefault();
+      const chatInput = document.querySelector(".chat-input");
+      if (chatInput) chatInput.focus();
+      return;
+    }
+  });
+
   // AI Vision Extraction (Qwen2-VL)
   async function extractWithVision() {
+    let progressInterval = null;
     try {
       statusEl.textContent = "Checking backend connection...";
       extractBtn.disabled = true;
@@ -1202,6 +1236,32 @@ function renderApp() {
         );
       }
 
+      // Show progress bar
+      resultsContainer.innerHTML = `
+        <div id="extraction-progress" class="animate-fadeUp" style="padding: 20px; text-align: center;">
+          <div style="background: var(--border, #e2e8f0); border-radius: 8px; height: 8px; overflow: hidden; margin-bottom: 10px;">
+            <div id="progress-fill" style="background: linear-gradient(90deg, #6366f1, #8b5cf6); height: 100%; width: 0%; border-radius: 8px; transition: width 0.5s ease;"></div>
+          </div>
+          <div id="progress-text" style="font-size: 0.8rem; color: var(--text-muted, #94a3b8);">Starting extraction...</div>
+        </div>
+      `;
+
+      // Start polling progress
+      progressInterval = setInterval(async () => {
+        try {
+          const res = await fetch("http://localhost:8000/api/progress");
+          const prog = await res.json();
+          const fill = document.getElementById("progress-fill");
+          const text = document.getElementById("progress-text");
+          if (fill && prog.active) {
+            fill.style.width = `${prog.percent}%`;
+          }
+          if (text && prog.message) {
+            text.textContent = `${prog.message} (${prog.percent}%)`;
+          }
+        } catch { /* ignore polling errors */ }
+      }, 2000);
+
       const votingChecked = document.getElementById("voting-checkbox")?.checked;
       const votingRounds = votingChecked ? 3 : 1;
       statusEl.textContent = votingChecked
@@ -1209,7 +1269,8 @@ function renderApp() {
         : "Extracting with Qwen2.5-VL...";
 
       const rawModeChecked = document.getElementById("raw-mode-checkbox")?.checked;
-      const extractedData = await extractFields(selectedFile, CURRENT_FIELDS, "qwen", votingRounds, checkboxEnabled, rawModeChecked);
+      const multipageEnabled = totalPageCount > 1;
+      const extractedData = await extractFields(selectedFile, CURRENT_FIELDS, "qwen", votingRounds, checkboxEnabled, rawModeChecked, multipageEnabled);
 
       console.log("--- QWEN OUTPUT (JSON) ---");
       console.log(JSON.stringify(extractedData, null, 2));
@@ -1225,6 +1286,7 @@ function renderApp() {
       statusEl.textContent = `Error: ${err.message}`;
       updateStatus("ready");
     } finally {
+      if (progressInterval) clearInterval(progressInterval);
       extractBtn.disabled = false;
     }
   }
@@ -1324,6 +1386,74 @@ function renderApp() {
     return `<div class="field-value">${jsonStr}</div>`;
   }
 
+  // ─── Smart Field Decomposition ───
+  // Detects composite values and breaks them into visual sub-parts
+  function decomposeField(fieldName, value) {
+    if (!value || typeof value !== "string" || value === "—") return null;
+    const fLower = fieldName.toLowerCase();
+    
+    // Sex/DOB/Age: "Female 01/02/1938 87 Years"
+    const sexDobAgeMatch = value.match(/^(Male|Female|M|F)\s+(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\s+(\d{1,3})\s*(Years?|yrs?)?$/i);
+    if (sexDobAgeMatch || (fLower.includes("sex") && fLower.includes("dob"))) {
+      if (sexDobAgeMatch) {
+        return [
+          { label: "Sex", value: sexDobAgeMatch[1] },
+          { label: "DOB", value: sexDobAgeMatch[2] },
+          { label: "Age", value: `${sexDobAgeMatch[3]} Years` },
+        ];
+      }
+    }
+
+    // Address: multi-line or "STREET, CITY, STATE ZIP"
+    if (fLower.includes("address") || fLower.includes("location")) {
+      // Multi-line address
+      const lines = value.split(/\n|\\n/).map(l => l.trim()).filter(Boolean);
+      if (lines.length >= 2) {
+        const lastLine = lines[lines.length - 1];
+        const cityStateZip = lastLine.match(/^(.+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+        if (cityStateZip) {
+          const parts = [
+            ...lines.slice(0, lines.length - 1).map((l, i) => ({ label: i === 0 ? "Street" : `Line ${i + 1}`, value: l })),
+            { label: "City", value: cityStateZip[1] },
+            { label: "State", value: cityStateZip[2] },
+            { label: "Zip", value: cityStateZip[3] },
+          ];
+          return parts;
+        }
+        return lines.map((l, i) => ({ label: `Line ${i + 1}`, value: l }));
+      }
+      // Single-line "CITY, STATE ZIP"
+      const singleLine = value.match(/^(.+?)\s*,\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+      if (singleLine) {
+        return [
+          { label: "City", value: singleLine[1] },
+          { label: "State", value: singleLine[2] },
+          { label: "Zip", value: singleLine[3] },
+        ];
+      }
+    }
+
+    // Name: "LAST, FIRST" → separate
+    if (fLower.includes("name") && value.includes(",")) {
+      const parts = value.split(",").map(s => s.trim());
+      if (parts.length === 2 && parts[0].length > 1 && parts[1].length > 1) {
+        return [
+          { label: "Last Name", value: parts[0] },
+          { label: "First Name", value: parts[1] },
+        ];
+      }
+    }
+
+    return null; // Not a composite field
+  }
+
+  // Format decomposed parts as HTML
+  function renderDecomposed(parts) {
+    return `<div class="decomposed-parts" style="display: flex; flex-direction: column; gap: 4px; margin-top: 4px;">${
+      parts.map(p => `<div style="display: flex; gap: 6px; align-items: baseline;"><span style="font-size: 0.68rem; color: var(--text-muted, #94a3b8); min-width: 60px; text-align: right;">${p.label}:</span><span style="font-size: 0.82rem; font-weight: 500; color: var(--text, #1e293b);">${p.value}</span></div>`).join("")
+    }</div>`;
+  }
+
   function renderResults(container, data) {
     currentExtractionData = { ...data };
 
@@ -1337,20 +1467,29 @@ function renderApp() {
       return;
     }
 
-    // Extract _meta for signals and normalized values
+    // Extract _meta for confidence and normalized values
     const meta = data._meta || {};
     const normalizedValues = meta.normalized_values || {};
-    const metaSignals = meta.signals || {};
+    const confidenceScores = meta.confidence || {};
     const flaggedFields = meta.flagged_fields || [];
     const totalPages = meta.total_pages || 1;
     const hasNormalized = Object.keys(normalizedValues).length > 0;
 
+    // Count fields that can be deep-parsed
+    let decomposableCount = 0;
+    for (const [key, value] of Object.entries(data)) {
+      if (key === "_meta") continue;
+      if (decomposeField(key, value)) decomposableCount++;
+    }
+    const hasFormattable = hasNormalized || decomposableCount > 0;
+    const formattableCount = Object.keys(normalizedValues).length + decomposableCount;
+
     // Track format state
     let showFormatted = false;
 
-    // Toggle button (only shows if there are normalized values)
+    // Toggle button (shows if there are normalized values OR decomposable fields)
     let html = "";
-    if (hasNormalized) {
+    if (hasFormattable) {
       html += `
         <div class="format-toggle-bar animate-fadeUp" style="display: flex; align-items: center; gap: 10px; margin-bottom: 14px; padding: 8px 14px; background: var(--surface, #f8f9fa); border-radius: 10px; border: 1px solid var(--border, #e2e8f0);">
           <span style="font-size: 0.8rem; color: var(--text-muted, #64748b);">Output Format:</span>
@@ -1358,7 +1497,7 @@ function renderApp() {
             <span id="format-toggle-icon" style="font-size: 0.9rem;">${icons.file(14)}</span>
             <span id="format-toggle-label">Raw</span>
           </button>
-          <span id="format-hint" style="font-size: 0.72rem; color: var(--text-muted, #94a3b8); margin-left: auto;">${Object.keys(normalizedValues).length} field(s) can be formatted</span>
+          <span id="format-hint" style="font-size: 0.72rem; color: var(--text-muted, #94a3b8); margin-left: auto;">${formattableCount} field(s) can be formatted</span>
         </div>
       `;
     }
@@ -1372,31 +1511,18 @@ function renderApp() {
       const displayValue = value && value !== "None" ? value : "—";
       const safeValue = value && value !== "None" ? value : "";
       
-      // Build signal display
-      const fieldSignal = metaSignals[key] || {};
-      const source = fieldSignal.source || "";
-      const flags = fieldSignal.flags || [];
+      // Build confidence display
+      const confidence = confidenceScores[key];
       const isFlagged = flaggedFields.includes(key);
       
-      // Source badge icon mapping
-      const sourceIcons = {
-        batch: "⚡", fallback: "🔍", voting: "🗳️", paddleocr: "📄",
-        checkbox_batch: "☑", checkbox_vqa: "🔍", table: "📊", unknown: "❓",
-      };
-      const sourceIcon = sourceIcons[source] || "";
-      const sourceBadge = source ? `<span class="signal-badge">${sourceIcon} ${source}</span>` : "";
-      const fieldPage = fieldSignal.page || 1;
-      const pageBadge = totalPages > 1 ? `<span class="signal-badge" style="opacity:0.7;" title="Found on page ${fieldPage}">pg ${fieldPage}</span>` : "";
-      
-      // Flag pills
-      const flagPills = flags.map(f => {
-        const flagIcons = {
-          empty_value: "⭕", fallback_recovery: "🔄", voting_disagreed: "⚖️",
-          validation_error: "❌", vqa_fallback: "🔍", not_found: "❓",
-          fuzzy_match: "≈",
-        };
-        return `<span class="flag-pill">${flagIcons[f] || "⚠"} ${f.replace(/_/g, " ")}</span>`;
-      }).join("");
+      // Confidence dot: 🟢 ≥ 0.8, 🟡 0.5–0.79, 🔴 < 0.5
+      let confDot = "";
+      if (confidence !== undefined) {
+        const pct = Math.round(confidence * 100);
+        const color = confidence >= 0.8 ? "#22c55e" : confidence >= 0.5 ? "#eab308" : "#ef4444";
+        const label = confidence >= 0.8 ? "High" : confidence >= 0.5 ? "Medium" : "Low";
+        confDot = `<span class="confidence-dot" style="cursor: help;" title="${label} Confidence"><span style="width: 9px; height: 9px; border-radius: 50%; background: ${color}; display: inline-block; box-shadow: 0 0 4px ${color}40;"></span></span>`;
+      }
 
       // Check if this field has a different normalized value
       const normalizedVal = normalizedValues[key];
@@ -1406,13 +1532,17 @@ function renderApp() {
         : "";
 
       // ─── Table rendering ───
-      const tableType = fieldSignal.type; // "table" | "column" | "row" | undefined
       let valueHtml;
       let isTableField = false;
-      if (tableType && (tableType === "table" || tableType === "column" || tableType === "row")) {
-        isTableField = true;
-        valueHtml = renderTableValue(value, tableType);
-      } else {
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed) || typeof parsed === "object") {
+          isTableField = true;
+          valueHtml = renderTableValue(value, Array.isArray(parsed) ? "table" : "row");
+        } else {
+          valueHtml = `<div class="field-value">${displayValue}</div>`;
+        }
+      } catch {
         valueHtml = `<div class="field-value">${displayValue}</div>`;
       }
 
@@ -1420,13 +1550,12 @@ function renderApp() {
         <div class="result-card animate-fadeUp${isFlagged ? ' flagged' : ''}${isTableField ? ' table-card' : ''}" data-field="${key}" data-raw="${safeValue}" data-normalized="${hasFormat ? normalizedVal : safeValue}" style="animation-delay: ${idx * 0.03}s;">
           <div class="card-header">
             <span class="field-name">${key}${formatIndicator}</span>
-            ${pageBadge}${sourceBadge}
+            ${confDot}
           </div>
-          ${flagPills ? `<div class="flag-pills">${flagPills}</div>` : ""}
           ${valueHtml}
           <div class="card-footer">
             <button class="btn-icon btn-resend" data-field="${key}" title="Re-extract">${icons.refreshCw(14)}</button>
-            <button class="btn-icon btn-flag" data-field="${key}" data-value="${safeValue}" data-signal="${source || 'manual_flag'}" title="Flag for review">${icons.alertCircle(14)}</button>
+            <button class="btn-icon btn-flag" data-field="${key}" data-value="${safeValue}" data-signal="manual_flag" title="Flag for review">${icons.alertCircle(14)}</button>
             <button class="btn-icon btn-delete-result" data-field="${key}" title="Remove">${icons.x(14)}</button>
           </div>
         </div>
@@ -1444,7 +1573,13 @@ function renderApp() {
     html += `
       <div class="json-actions animate-fadeUp" style="animation-delay: ${idx * 0.03}s;">
         <button id="copy-json" class="btn-secondary">${icons.copy(14)} Copy JSON</button>
-        <button id="download-json" class="btn-secondary">${icons.download(14)} Download JSON</button>
+        <div style="position: relative; display: inline-block;">
+          <button id="export-dropdown-btn" class="btn-secondary" style="background: #27ae60; color: #fff;">${icons.download(14)} Export ▾</button>
+          <div id="export-dropdown-menu" style="display: none; position: absolute; top: 100%; left: 0; z-index: 100; background: var(--surface, #fff); border: 1px solid var(--border, #e2e8f0); border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); min-width: 140px; margin-top: 4px; overflow: hidden;">
+            <button id="download-json" style="display: block; width: 100%; text-align: left; padding: 8px 14px; border: none; background: none; cursor: pointer; font-size: 0.82rem; color: var(--text, #1e293b);" onmouseover="this.style.background='var(--surface-hover, #f1f5f9)'" onmouseout="this.style.background='none'">${icons.file(14)} JSON</button>
+            <button id="export-csv" style="display: block; width: 100%; text-align: left; padding: 8px 14px; border: none; background: none; cursor: pointer; font-size: 0.82rem; color: var(--text, #1e293b);" onmouseover="this.style.background='var(--surface-hover, #f1f5f9)'" onmouseout="this.style.background='none'">${icons.table ? icons.table(14) : '▇'} CSV</button>
+          </div>
+        </div>
         <button id="toggle-json" class="btn-secondary">${icons.eye(14)} View JSON</button>
       </div>
       <pre id="json-output" class="json-code" style="display: none;">${JSON.stringify(exportData, null, 2)}</pre>
@@ -1475,7 +1610,7 @@ function renderApp() {
           if (hint) hint.textContent = `${Object.keys(normalizedValues).length} field(s) can be formatted`;
         }
 
-        // Swap values on all cards
+        // Swap values on all cards + apply deep-parsing
         container.querySelectorAll(".result-card").forEach((card) => {
           const field = card.dataset.field;
           const raw = card.dataset.raw;
@@ -1483,10 +1618,23 @@ function renderApp() {
           const valueEl = card.querySelector(".field-value");
           const indicator = card.querySelector(".format-indicator");
 
-          if (raw !== normalized) {
-            valueEl.textContent = showFormatted ? (normalized || raw || "—") : (raw || "—");
-            // Show sparkle indicator when formatted
-            if (indicator) indicator.style.display = showFormatted ? "inline" : "none";
+          if (showFormatted) {
+            // Try deep-parsing first
+            const decomposed = decomposeField(field, raw);
+            if (decomposed) {
+              valueEl.innerHTML = renderDecomposed(decomposed);
+              if (indicator) indicator.style.display = "inline";
+            } else if (raw !== normalized) {
+              valueEl.textContent = normalized || raw || "—";
+              if (indicator) indicator.style.display = "inline";
+            }
+          } else {
+            // Reset to raw
+            valueEl.textContent = raw || "—";
+            // Remove any decomposed parts
+            const existing = card.querySelector(".decomposed-parts");
+            if (existing) existing.remove();
+            if (indicator) indicator.style.display = "none";
           }
         });
 
@@ -1569,9 +1717,12 @@ function renderApp() {
           // Update data
           currentExtractionData[fieldName] = newValue;
 
-          // Update signal badge
-          const badge = card.querySelector(".signal-badge");
-          if (badge) badge.innerHTML = `${icons.refreshCw(11)} re-extract`;
+          // Update confidence dot for re-extracted field
+          const confDot = card.querySelector(".confidence-dot");
+          if (confDot) {
+            confDot.innerHTML = `<span style="width: 9px; height: 9px; border-radius: 50%; background: #22c55e; display: inline-block; box-shadow: 0 0 4px #22c55e40;"></span>`;
+            confDot.title = "High Confidence";
+          }
 
           // Update JSON preview
           const jsonOut = document.getElementById("json-output");
@@ -1635,7 +1786,18 @@ function renderApp() {
       setTimeout(() => (btn.innerHTML = `${icons.copy(14)} Copy JSON`), 2000);
     });
 
-    // Download JSON
+    // Export dropdown toggle
+    const exportDropdownBtn = document.getElementById("export-dropdown-btn");
+    const exportDropdownMenu = document.getElementById("export-dropdown-menu");
+    if (exportDropdownBtn && exportDropdownMenu) {
+      exportDropdownBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        exportDropdownMenu.style.display = exportDropdownMenu.style.display === "none" ? "block" : "none";
+      });
+      document.addEventListener("click", () => { exportDropdownMenu.style.display = "none"; });
+    }
+
+    // Download JSON (inside dropdown)
     document.getElementById("download-json")?.addEventListener("click", () => {
       const blob = new Blob([JSON.stringify(currentExtractionData, null, 2)], {
         type: "application/json",
@@ -1647,6 +1809,21 @@ function renderApp() {
         (selectedFile?.name.replace(".pdf", "") || "extraction") + ".json";
       a.click();
       URL.revokeObjectURL(url);
+    });
+
+    // Export CSV
+    document.getElementById("export-csv")?.addEventListener("click", async () => {
+      const btn = document.getElementById("export-csv");
+      try {
+        btn.textContent = "Exporting...";
+        await exportCSV(currentExtractionData, selectedFile?.name || "extraction");
+        btn.innerHTML = `${icons.check(14)} Exported!`;
+        setTimeout(() => { btn.innerHTML = `${icons.download(14)} Export CSV`; }, 2000);
+      } catch (err) {
+        console.error("CSV export error:", err);
+        btn.textContent = "Export failed";
+        setTimeout(() => { btn.innerHTML = `${icons.download(14)} Export CSV`; }, 2000);
+      }
     });
 
     // Toggle JSON view

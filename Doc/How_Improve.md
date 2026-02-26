@@ -306,3 +306,13 @@ VLM returns: {"value": "01/01/2024", "bbox": [420, 180, 580, 200]}
 - Store extraction history per document type
 - After N successful extractions → build spatial template
 - Skip VLM entirely for known templates → instant extraction
+
+-Enable validators
+-CSV/Excel export
+-Streaming extraction progress
+-Batch processing
+-Document classification(no hardcoded than yes)
+-Per-field confidence scores snd remove tags(batch, fallback, voting_disagreed)-dont wanna user to see process like voting,fallback etc...
+-LoRA fine-tuning pipeline - real traning setup, but in way that we can remove that pipeline from user and ship to admin pannel, normal user cant train model.
+-Multi-page field extraction - not only for fields but all types of extraction, including future ones(radio, sign, barcode, links etc..)
+Keyboard shortcuts

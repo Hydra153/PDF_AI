@@ -94,6 +94,7 @@ class TrainingDataCollector:
         signals: Dict[str, dict],
         model_used: str = "qwen",
         voting_rounds: int = 1,
+        user_id: str = "default",
     ) -> str:
         """
         Save a complete training sample with maximum context.
@@ -143,6 +144,7 @@ class TrainingDataCollector:
             "corrections": corrections,
             "signals": signals,
             "is_corrected": len(corrections) > 0,
+            "user_id": user_id,
         }
 
         # Append to JSONL
@@ -245,11 +247,14 @@ class TrainingDataCollector:
         unique_docs = set()
         unique_fields = set()
         corrected_fields = set()
+        per_user = {}  # user_id → sample count
         for s in samples:
             unique_docs.add(s.get("source_pdf", ""))
             unique_fields.update(s.get("fields_requested", []))
             for field in s.get("corrections", {}):
                 corrected_fields.add(field)
+            uid = s.get("user_id", "default")
+            per_user[uid] = per_user.get(uid, 0) + 1
 
         return {
             "total_samples": len(samples),
@@ -258,6 +263,7 @@ class TrainingDataCollector:
             "unique_documents": len(unique_docs),
             "unique_fields": len(unique_fields),
             "most_corrected_fields": list(corrected_fields),
+            "per_user": per_user,
             "files": self.metadata.get("files", {}),
             "last_export": self.metadata.get("last_export"),
             "ready_for_training": len(samples) >= 20,

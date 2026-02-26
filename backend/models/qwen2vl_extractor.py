@@ -30,7 +30,7 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 # Toggle: set to True to re-enable field validators (normalization + type checking)
-ENABLE_VALIDATORS = False
+ENABLE_VALIDATORS = True
 
 # ─── Singleton Model Cache ───
 _qwen2vl_model = None
@@ -812,6 +812,314 @@ class Qwen2VLExtractor:
             logger.error(f"Q&A failed for '{question}': {e}")
             print(f"      ❌ Q&A Error: {e}")
             return ""
+    
+    def ask_question_multipage(
+        self, images: list, question: str, history: list = None
+    ) -> str:
+        """
+        Answer a question using multi-page context.
+        
+        Sends up to 5 page images in a single VLM call so the model
+        can reason across pages. Accepts optional conversation history
+        for follow-up questions.
+        
+        Args:
+            images: List of PIL Images (one per page, max 5)
+            question: Natural language question
+            history: List of {"role": "user"|"assistant", "content": str}
+        
+        Returns:
+            Answer string
+        """
+        if not images:
+            return ""
+        
+        # Cap at 5 pages to avoid VRAM issues
+        images = images[:5]
+        
+        system_prompt = (
+            "You are a document analysis assistant. "
+            "You ONLY answer questions about the document shown in the image(s). "
+            "Rules: "
+            "1. For checkbox questions, indicate whether each item is checked (✓), unchecked (☐), or crossed (✗). "
+            "2. For yes/no questions, answer clearly with Yes or No followed by a brief explanation. "
+            "3. For value questions, return the exact text as it appears in the document. "
+            "4. Use markdown formatting: use **bold** for labels, use bullet points (- ) for lists, use numbered lists (1. ) for ordered items. "
+            "5. If the question is NOT about the document (e.g. casual chat, personal questions, unrelated topics), "
+            "respond ONLY with: NOT_DOCUMENT_RELATED "
+            "6. If the question is gibberish or unintelligible, respond ONLY with: NOT_DOCUMENT_RELATED "
+            "7. If the information is not found in the document, respond ONLY with: NOT_FOUND_IN_DOCUMENT "
+            "Be concise, accurate, and well-formatted."
+        )
+        
+        # Build messages with conversation history
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # Add conversation history if provided
+        if history:
+            for turn in history:
+                messages.append({
+                    "role": turn.get("role", "user"),
+                    "content": turn.get("content", ""),
+                })
+        
+        # Build user message with all page images + question
+        user_content = []
+        for i, img in enumerate(images):
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            user_content.append({"type": "image", "image": img})
+        
+        if len(images) > 1:
+            user_content.append({
+                "type": "text",
+                "text": f"This document has {len(images)} pages shown above. {question}",
+            })
+        else:
+            user_content.append({"type": "text", "text": question})
+        
+        messages.append({"role": "user", "content": user_content})
+        
+        try:
+            from qwen_vl_utils import process_vision_info
+            
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.device)
+            
+            print(f"   💬 Multi-page Q&A ({len(images)} pages): '{question[:80]}...'")
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=2048,
+                    do_sample=True,
+                    temperature=0.3,
+                    top_p=0.9,
+                )
+            
+            input_len = inputs["input_ids"].shape[1]
+            output_ids = outputs[:, input_len:]
+            output_text = self.processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip()
+            
+            print(f"   📝 Answer ({len(output_text)} chars): {output_text[:200]}...")
+            
+            return output_text
+            
+        except Exception as e:
+            logger.error(f"Multi-page Q&A failed: {e}")
+            print(f"      ❌ Multi-page Q&A Error: {e}")
+            return ""
+    
+    # ─── Multi-Page Extraction Architecture ───────────────────────────
+    # Generic multi-page VLM call — used by all extraction types.
+    # Future types (radio, signature, barcode, links) should add a new
+    # public wrapper method that calls _multipage_extract with the
+    # appropriate system/user prompts.
+    
+    def _multipage_extract(
+        self, images: list, system_prompt: str, user_prompt: str,
+        max_pages: int = 5, max_tokens: int = 2048
+    ) -> str:
+        """
+        Generic multi-page VLM call — sends up to max_pages images in one inference.
+        
+        All multi-page extraction methods should call this instead of duplicating
+        the VLM call boilerplate. Returns raw model output text.
+        
+        Args:
+            images: List of PIL Images (one per page)
+            system_prompt: System persona prompt
+            user_prompt: User instruction prompt
+            max_pages: Cap pages to avoid VRAM issues (default 5)
+            max_tokens: Max output tokens (default 2048)
+        
+        Returns:
+            Raw model output text string
+        """
+        if not images:
+            return ""
+        
+        images = images[:max_pages]
+        
+        # Build user content: all page images + text prompt
+        user_content = []
+        for img in images:
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            user_content.append({"type": "image", "image": img})
+        user_content.append({"type": "text", "text": user_prompt})
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        
+        try:
+            from qwen_vl_utils import process_vision_info
+            
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_tokens,
+                    do_sample=True,
+                    temperature=0.1,
+                    top_p=0.9,
+                )
+            
+            input_len = inputs["input_ids"].shape[1]
+            output_ids = outputs[:, input_len:]
+            return self.processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip()
+            
+        except Exception as e:
+            logger.error(f"Multi-page extraction failed: {e}")
+            print(f"      ❌ Multi-page extraction error: {e}")
+            return ""
+    
+    def extract_fields_multipage(
+        self, images: list, fields: List[str]
+    ) -> Dict[str, str]:
+        """
+        Extract fields across all pages in a single VLM call.
+        
+        Sends all page images at once so the model can locate fields
+        anywhere in the document. Useful when fields span pages or
+        the user doesn't know which page has which field.
+        
+        Returns:
+            Dict of {field_name: extracted_value}
+        """
+        field_list = ", ".join(f'"{f}"' for f in fields)
+        
+        system_prompt = (
+            "You are a high-precision form field extraction engine. "
+            "Read ALL document pages and extract only what is explicitly present. "
+            "Do not guess, infer, correct, or normalize. "
+            "Return values exactly as written in the document. "
+            "Output valid JSON only."
+        )
+        
+        user_prompt = (
+            f"This document has {len(images)} pages shown above. "
+            f"Extract these fields from ANY page: {field_list}. "
+            f"Return a JSON object with exactly these keys. "
+            f"If a field is not found on any page, set its value to empty string.\n\n"
+            f"Example output format:\n"
+            f'{{"Patient Name": "DOE, JOHN", "DOB": "01/15/1980"}}\n\n'
+            f"Now extract from this document:"
+        )
+        
+        print(f"   📄 Multi-page field extraction ({len(images)} pages, {len(fields)} fields)")
+        raw = self._multipage_extract(images, system_prompt, user_prompt, max_tokens=1024)
+        print(f"   📝 Multi-page raw ({len(raw)} chars): {raw[:300]}...")
+        
+        return self._parse_json_output(raw, fields)
+    
+    def extract_checkboxes_multipage(
+        self, images: list
+    ) -> list:
+        """
+        Auto-detect checkboxes across all pages in a single VLM call.
+        
+        Returns:
+            List of {"label": str, "checked": bool, "page": int}
+        """
+        system_prompt = (
+            "You are a checkbox detection engine. "
+            "Examine ALL pages of this document and find every physical checkbox. "
+            "For each checkbox, determine if it is checked (filled/marked) or unchecked (empty). "
+            "Return a JSON array of objects with: label, checked (boolean), page (1-indexed)."
+        )
+        
+        user_prompt = (
+            f"This document has {len(images)} pages. "
+            f"Find ALL checkboxes on ALL pages. "
+            f"Return JSON array: "
+            f'[{{"label": "Item Name", "checked": true, "page": 1}}, ...]'
+        )
+        
+        print(f"   ☑️ Multi-page checkbox detection ({len(images)} pages)")
+        raw = self._multipage_extract(images, system_prompt, user_prompt, max_tokens=2048)
+        
+        # Parse checkbox list
+        try:
+            repaired = self._repair_json(raw)
+            result = json.loads(repaired)
+            if isinstance(result, list):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+        
+        # Fallback: try the existing parser
+        return self._parse_checkbox_list(raw)
+    
+    def extract_table_multipage(
+        self, images: list, query: str
+    ) -> tuple:
+        """
+        Extract table data across all pages in a single VLM call.
+        
+        Args:
+            query: Table name, column heading, or row reference
+        
+        Returns:
+            Tuple of (data, table_type) where table_type is "table"|"column"|"row"|None
+        """
+        system_prompt = (
+            "You are a table extraction engine. "
+            "Examine ALL pages and find the requested table data. "
+            "Return the data as a JSON array of row objects. "
+            "Each row object should have column headers as keys."
+        )
+        
+        user_prompt = (
+            f"This document has {len(images)} pages. "
+            f'Extract the table data for: "{query}". '
+            f"Return as a JSON array of row objects.\n"
+            f'Example: [{{"Name": "John", "Amount": "$100"}}, ...]'
+        )
+        
+        print(f"   📊 Multi-page table extraction ({len(images)} pages): '{query}'")
+        raw = self._multipage_extract(images, system_prompt, user_prompt, max_tokens=2048)
+        
+        data = self._parse_table_json(raw)
+        if data is not None:
+            if isinstance(data, list):
+                return data, "table"
+            elif isinstance(data, dict):
+                return data, "row"
+        
+        return None, None
     
     def _zoom_extract_field(
         self, image: Image.Image, field: str
@@ -2001,17 +2309,56 @@ class Qwen2VLExtractor:
         fields = [f.strip().strip('"\'') for f in output_text.split(',')]
         return [f for f in fields if f and len(f) > 1]
     
+    @staticmethod
+    def _repair_json(text: str) -> str:
+        """
+        Attempt to repair common JSON malformations from VLM output.
+        
+        Fixes:
+          - Markdown code fences (```json ... ```)
+          - Trailing commas before } or ]
+          - Single-quoted strings → double-quoted (safe for apostrophes)
+          - Python booleans/None → JSON booleans/null
+          - Truncated JSON (missing closing })
+        """
+        import re as _re
+        # Strip markdown code fences
+        text = _re.sub(r'^\s*```(?:json)?\s*', '', text)
+        text = _re.sub(r'\s*```\s*$', '', text)
+        # Trailing commas: {"a": 1,} or ["a",]
+        text = _re.sub(r',\s*([}\]])', r'\1', text)
+        # Python booleans/None → JSON
+        text = text.replace('True', 'true').replace('False', 'false').replace('None', 'null')
+        # Single-quoted strings → double-quoted (SAFE for apostrophes)
+        # Only replace quotes at word boundaries, not inside contractions like O'Brien
+        # Pattern: replace ' that is preceded/followed by non-alphabetic chars
+        if text.count("'") > text.count('"'):
+            text = _re.sub(r"(?<![a-zA-Z])'|'(?![a-zA-Z])", '"', text)
+        # Truncated JSON: missing closing brace
+        open_braces = text.count('{') - text.count('}')
+        if open_braces > 0:
+            text = text + '}' * open_braces
+        open_brackets = text.count('[') - text.count(']')
+        if open_brackets > 0:
+            text = text + ']' * open_brackets
+        return text.strip()
+    
     def _parse_json_output(self, output_text: str, fields: List[str]) -> Dict[str, str]:
         """
-        Parse JSON from model output text.
+        Parse JSON from model output text with automatic repair.
         
-        Handles cases where the model wraps JSON in markdown code blocks
-        or includes extra text before/after the JSON.
+        Pipeline:
+          1. Try direct json.loads()
+          2. Try _repair_json() + json.loads()
+          3. Extract from markdown code block (with repair)
+          4. Extract from brace-matching regex (with repair)
+          5. Fallback: key-value pattern matching from free text
+        
         Uses fuzzy key matching when model returns slightly different keys.
         """
         result_dict = None
         
-        # Try direct JSON parse first
+        # Tier 1: Try direct JSON parse first
         try:
             result = json.loads(output_text)
             if isinstance(result, dict):
@@ -2019,23 +2366,35 @@ class Qwen2VLExtractor:
         except json.JSONDecodeError:
             pass
         
-        # Try to extract JSON from markdown code block
+        # Tier 2: Try repair + JSON parse
+        if result_dict is None:
+            try:
+                repaired = self._repair_json(output_text)
+                result = json.loads(repaired)
+                if isinstance(result, dict):
+                    result_dict = result
+            except json.JSONDecodeError:
+                pass
+        
+        # Tier 3: Try to extract JSON from markdown code block
         if result_dict is None:
             json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', output_text, re.DOTALL)
             if json_match:
                 try:
-                    result = json.loads(json_match.group(1))
+                    repaired = self._repair_json(json_match.group(1))
+                    result = json.loads(repaired)
                     if isinstance(result, dict):
                         result_dict = result
                 except json.JSONDecodeError:
                     pass
         
-        # Try to find any JSON-like object in the text
+        # Tier 4: Try to find any JSON-like object in the text
         if result_dict is None:
             brace_match = re.search(r'\{[^{}]*\}', output_text, re.DOTALL)
             if brace_match:
                 try:
-                    result = json.loads(brace_match.group(0))
+                    repaired = self._repair_json(brace_match.group(0))
+                    result = json.loads(repaired)
                     if isinstance(result, dict):
                         result_dict = result
                 except json.JSONDecodeError:
@@ -2050,7 +2409,7 @@ class Qwen2VLExtractor:
                     matched[key] = ""
             return matched
         
-        # Last resort: try to extract field values from free text
+        # Tier 5: Last resort — extract field values from free text
         logger.warning(f"Could not parse JSON from Qwen2-VL output: {output_text[:200]}")
         results = {}
         for field in fields:

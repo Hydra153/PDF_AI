@@ -25,19 +25,17 @@ def validate_date(value: str) -> Tuple[bool, str, Optional[str]]:
     
     value = value.strip()
     
-    # Common date formats to try
+    # Date formats — US (MM/DD) first, no ambiguous DD/MM numeric formats
     formats = [
-        "%m/%d/%Y",      # 01/02/2024
-        "%d/%m/%Y",      # 02/01/2024
-        "%Y-%m-%d",      # 2024-01-02
+        "%m/%d/%Y",      # 01/02/2024  (US standard)
+        "%Y-%m-%d",      # 2024-01-02  (ISO)
         "%m-%d-%Y",      # 01-02-2024
-        "%d-%m-%Y",      # 02-01-2024
         "%m.%d.%Y",      # 01.02.2024
-        "%d.%m.%Y",      # 02.01.2024
-        "%B %d, %Y",     # January 02, 2024
-        "%b %d, %Y",     # Jan 02, 2024
+        "%B %d, %Y",     # January 02, 2024  (unambiguous)
+        "%b %d, %Y",     # Jan 02, 2024      (unambiguous)
+        "%d %B %Y",      # 02 January 2024   (unambiguous)
+        "%d %b %Y",      # 02 Jan 2024       (unambiguous)
         "%m/%d/%y",      # 01/02/24
-        "%d/%m/%y",      # 02/01/24
         "%Y/%m/%d",      # 2024/01/02
     ]
     
@@ -328,15 +326,7 @@ def find_validator(field_name: str):
     if best_match is not None:
         return best_match
     
-    # Tier 4: Fuzzy matching via difflib (handles typos)
-    import difflib
-    all_keys = list(VALIDATORS.keys())
-    matches = difflib.get_close_matches(
-        field_name, all_keys, n=1, cutoff=0.6
-    )
-    if matches:
-        return VALIDATORS[matches[0]]
-    
+    # No match found — field passes through without validation
     return None
 
 

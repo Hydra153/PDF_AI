@@ -50,7 +50,7 @@ export async function checkBackendHealth() {
  * @param {number} votingRounds - Number of voting passes (default: 1, use 3 for accuracy boost)
  * @returns {Object} Extracted field values
  */
-export function extractFields(file, fields, model = "qwen", votingRounds = 1, checkboxEnabled = false, rawMode = false) {
+export function extractFields(file, fields, model = "qwen", votingRounds = 1, checkboxEnabled = false, rawMode = false, multipage = false) {
   return withLock(async () => {
     try {
       const formData = new FormData();
@@ -62,6 +62,7 @@ export function extractFields(file, fields, model = "qwen", votingRounds = 1, ch
       }
       formData.append("checkbox_enabled", checkboxEnabled ? "true" : "false");
       formData.append("raw_mode", rawMode ? "true" : "false");
+      formData.append("multipage", multipage ? "true" : "false");
 
       const response = await fetch(`${BACKEND_URL}/api/extract`, {
         method: "POST",
@@ -205,15 +206,19 @@ export function findTables(file) {
  * @param {File} file - PDF file
  * @param {string} question - Question to ask
  * @param {string} model - Model to use (default: "qwen")
+ * @param {Array} history - Conversation history [{role, content}]
  * @returns {Object} {answer, time_seconds}
  */
-export function askQuestion(file, question, model = "qwen") {
+export function askQuestion(file, question, model = "qwen", history = []) {
   return withLock(async () => {
     try {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("question", question);
       formData.append("model", model);
+      if (history.length > 0) {
+        formData.append("history", JSON.stringify(history));
+      }
 
       const response = await fetch(`${BACKEND_URL}/api/ask`, {
         method: "POST",
@@ -274,4 +279,69 @@ export function reExtractField(file, fieldName, model = "qwen") {
       throw err;
     }
   });
+}
+
+/**
+ * Classify document type and get suggested fields using VLM
+ * @param {File} file - PDF or image file
+ * @returns {Object} {doc_type, suggested_fields, time_seconds}
+ */
+export function classifyDocument(file) {
+  return withLock(async () => {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch(`${BACKEND_URL}/api/classify`, {
+        method: "POST",
+        body: formData,
+        signal: AbortSignal.timeout(API_TIMEOUT),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || "Classification failed");
+      }
+
+      return await response.json();
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error("Request timeout");
+      }
+      throw err;
+    }
+  });
+}
+
+/**
+ * Export extraction results as CSV file download
+ * @param {Object} data - Extraction results (field → value)
+ * @param {string} filename - Original PDF filename
+ */
+export async function exportCSV(data, filename) {
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/export-csv`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data, filename }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || "Export failed");
+    }
+
+    // Trigger download
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${filename.replace(/\.[^.]+$/, "")}_extraction.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    throw err;
+  }
 }

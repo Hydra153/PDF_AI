@@ -22,7 +22,7 @@ logging.getLogger("watchfiles").setLevel(logging.WARNING)
 warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
 warnings.filterwarnings("ignore", message=".*fast processor by default.*")
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import List, Optional
@@ -82,6 +82,34 @@ _extraction_context = {
 # Reference: https://docs.python.org/3/library/asyncio-sync.html#asyncio.Semaphore
 _gpu_semaphore = asyncio.Semaphore(1)
 _GPU_TIMEOUT_SECONDS = 300  # Max wait time — PaddleOCR-VL first load can take ~60-120s
+
+# ─── Extraction Progress Tracking ───
+_extraction_progress = {
+    "active": False,
+    "step": 0,
+    "total": 0,
+    "message": "",
+    "percent": 0,
+}
+
+def _set_progress(step: int, total: int, message: str):
+    """Update extraction progress for frontend polling."""
+    _extraction_progress["active"] = True
+    _extraction_progress["step"] = step
+    _extraction_progress["total"] = total
+    _extraction_progress["message"] = message
+    _extraction_progress["percent"] = round((step / total) * 100) if total > 0 else 0
+
+def _clear_progress():
+    _extraction_progress["active"] = False
+    _extraction_progress["step"] = 0
+    _extraction_progress["total"] = 0
+    _extraction_progress["message"] = ""
+    _extraction_progress["percent"] = 0
+
+@app.get("/api/progress")
+async def get_progress():
+    return _extraction_progress
 
 # ─── Image Cache (multi-page) ───
 # Caches processed (enhanced) and raw images per PDF to avoid redundant
@@ -230,6 +258,7 @@ async def extract_fields(
     voting_rounds: int = Form(1),    # 1 = normal, 3 = accuracy boost (majority voting)
     checkbox_enabled: str = Form("false"),  # "true" = run checkbox auto-detection
     raw_mode: str = Form("false"),  # "true" = skip image enhancement, feed raw image to VLM
+    multipage: str = Form("false"),  # "true" = send all pages in one VLM call
 ):
     """
     Extract specified fields from PDF document using Qwen2-VL.
@@ -265,6 +294,7 @@ async def extract_fields(
         
         # Process PDF → Images (cached, multi-page)
         t_start = time.time()
+        _set_progress(1, 10, "Processing PDF...")
         print(f"📄 Processing PDF: {file.filename} (model: {model})")
         try:
             enhanced_images, raw_images = get_or_process_file(pdf_bytes, file.filename, need_raw=True)
@@ -286,6 +316,7 @@ async def extract_fields(
         num_pages = len(enhanced_images)
         field_labels = [f['key'] for f in fields_list]
         print(f"🤖 Extracting {len(field_labels)} fields from {num_pages} page(s) with {model}...")
+        _set_progress(2, 10, f"Extracting {len(field_labels)} fields from {num_pages} page(s)...")
         
         # ─── Multi-Page Extraction (serialized by GPU semaphore) ───
         all_results = {}          # field → value (first non-empty wins)
@@ -298,134 +329,155 @@ async def extract_fields(
                     print(f"🔒 GPU semaphore acquired for extraction")
                     extractor = Qwen2VLExtractor()
                     
-                    # ─── Table Pre-Scan: detect table structure per page ───
-                    import re as _re
-                    page_table_scans = {}  # page_idx → scan result
-                    detected_columns = {}  # normalized_col_name → (original_col_name, page_idx)
-                    detected_row_prefix = None  # e.g. "SL."
-                    
-                    for page_idx in range(num_pages):
-                        scan = extractor.scan_table_structure(enhanced_images[page_idx])
-                        page_table_scans[page_idx] = scan
-                        if scan.get("has_table"):
-                            for col in scan.get("columns", []):
-                                col_norm = col.strip().lower().rstrip(".")
-                                detected_columns[col_norm] = (col, page_idx)
-                            if scan.get("row_index") and not detected_row_prefix:
-                                detected_row_prefix = scan["row_index"].strip().rstrip(".")
-                    
-                    if detected_columns:
-                        print(f"   🔍 Detected table columns: {list(detected_columns.keys())}")
-                        if detected_row_prefix:
-                            print(f"   🔍 Row index prefix: '{detected_row_prefix}'")
-                    
-                    # ─── Smart field routing using scan results ───
-                    table_column_fields = []   # field matches a column header → column extraction
-                    table_row_fields = []      # field matches row_index + number → row extraction
-                    table_keyword_fields = []  # field contains "table" → full table extraction
-                    normal_fields = []         # everything else → normal batch extraction
-                    
-                    for f in field_labels:
-                        f_lower = f.strip().lower()
-                        f_norm = f_lower.rstrip(".")
+                    # ─── Multi-page fast-path: single VLM call across all pages ───
+                    use_multipage = multipage.lower() == "true" and num_pages > 1
+                    if use_multipage:
+                        print(f"   📄 Multi-page mode: sending {num_pages} pages in one VLM call")
+                        mp_results = extractor.extract_fields_multipage(enhanced_images, field_labels)
+                        for field in field_labels:
+                            value = mp_results.get(field, "")
+                            all_results[field] = value
+                            all_signals[field] = {
+                                "source": "multipage",
+                                "flags": [] if value.strip() else ["empty_value"],
+                                "page": "all",
+                            }
                         
-                        # Check if field contains "table" keyword
-                        if "table" in f_lower:
-                            table_keyword_fields.append(f)
-                        # Check if field matches a detected column header (exact, case-insensitive)
-                        elif f_norm in detected_columns:
-                            table_column_fields.append(f)
-                        # Check if field matches row index pattern: prefix + number (SL. 3, SL.3, SL 3)
-                        elif detected_row_prefix:
-                            prefix_norm = detected_row_prefix.lower()
-                            # Match: "SL. 3", "SL.3", "SL 3", "sl.7", "Row 2", "#5"
-                            row_pattern = rf'^({_re.escape(prefix_norm)}\.?\s*|row\s*(no\.?\s*)?|#)\s*\d+$'
-                            if _re.match(row_pattern, f_lower):
+                        # Checkbox multi-page
+                        if checkbox_enabled.lower() == "true":
+                            mp_checkboxes = extractor.extract_checkboxes_multipage(enhanced_images)
+                            all_results["_checkboxes"] = mp_checkboxes
+                    
+                    # ─── Standard page-by-page extraction ───
+                    if not use_multipage:
+                        # ─── Table Pre-Scan: detect table structure per page ───
+                        import re as _re
+                        page_table_scans = {}  # page_idx → scan result
+                        detected_columns = {}  # normalized_col_name → (original_col_name, page_idx)
+                        detected_row_prefix = None  # e.g. "SL."
+                        
+                        for page_idx in range(num_pages):
+                            scan = extractor.scan_table_structure(enhanced_images[page_idx])
+                            page_table_scans[page_idx] = scan
+                            if scan.get("has_table"):
+                                for col in scan.get("columns", []):
+                                    col_norm = col.strip().lower().rstrip(".")
+                                    detected_columns[col_norm] = (col, page_idx)
+                                if scan.get("row_index") and not detected_row_prefix:
+                                    detected_row_prefix = scan["row_index"].strip().rstrip(".")
+                        
+                        if detected_columns:
+                            print(f"   🔍 Detected table columns: {list(detected_columns.keys())}")
+                            if detected_row_prefix:
+                                print(f"   🔍 Row index prefix: '{detected_row_prefix}'")
+                        
+                        # ─── Smart field routing using scan results ───
+                        table_column_fields = []   # field matches a column header → column extraction
+                        table_row_fields = []      # field matches row_index + number → row extraction
+                        table_keyword_fields = []  # field contains "table" → full table extraction
+                        normal_fields = []         # everything else → normal batch extraction
+                        
+                        for f in field_labels:
+                            f_lower = f.strip().lower()
+                            f_norm = f_lower.rstrip(".")
+                            
+                            # Check if field contains "table" keyword
+                            if "table" in f_lower:
+                                table_keyword_fields.append(f)
+                            # Check if field matches a detected column header (exact, case-insensitive)
+                            elif f_norm in detected_columns:
+                                table_column_fields.append(f)
+                            # Check if field matches row index pattern: prefix + number (SL. 3, SL.3, SL 3)
+                            elif detected_row_prefix:
+                                prefix_norm = detected_row_prefix.lower()
+                                # Match: "SL. 3", "SL.3", "SL 3", "sl.7", "Row 2", "#5"
+                                row_pattern = rf'^({_re.escape(prefix_norm)}\.?\s*|row\s*(no\.?\s*)?|#)\s*\d+$'
+                                if _re.match(row_pattern, f_lower):
+                                    table_row_fields.append(f)
+                                else:
+                                    normal_fields.append(f)
+                            # Check default row patterns (Row N, #N)
+                            elif _re.match(r'^(row\s*(no\.?\s*)?|#)\s*\d+$', f_lower):
                                 table_row_fields.append(f)
                             else:
                                 normal_fields.append(f)
-                        # Check default row patterns (Row N, #N)
-                        elif _re.match(r'^(row\s*(no\.?\s*)?|#)\s*\d+$', f_lower):
-                            table_row_fields.append(f)
-                        else:
-                            normal_fields.append(f)
-                    
-                    if table_column_fields or table_row_fields or table_keyword_fields:
-                        print(f"\n   📊 Smart routing: {len(table_keyword_fields)} table, {len(table_column_fields)} column, {len(table_row_fields)} row, {len(normal_fields)} normal")
-                    
-                    # ─── Process table fields ───
-                    all_table_fields = table_keyword_fields + table_column_fields + table_row_fields
-                    if all_table_fields:
-                        for field_name in all_table_fields:
-                            # Find which page has the table
-                            table_pages = [idx for idx, s in page_table_scans.items() if s.get("has_table")]
-                            if not table_pages:
-                                table_pages = list(range(num_pages))
+                        
+                        if table_column_fields or table_row_fields or table_keyword_fields:
+                            print(f"\n   📊 Smart routing: {len(table_keyword_fields)} table, {len(table_column_fields)} column, {len(table_row_fields)} row, {len(normal_fields)} normal")
+                        
+                        # ─── Process table fields ───
+                        all_table_fields = table_keyword_fields + table_column_fields + table_row_fields
+                        if all_table_fields:
+                            for field_name in all_table_fields:
+                                # Find which page has the table
+                                table_pages = [idx for idx, s in page_table_scans.items() if s.get("has_table")]
+                                if not table_pages:
+                                    table_pages = list(range(num_pages))
+                                
+                                for page_idx in table_pages:
+                                    page_img = enhanced_images[page_idx]
+                                    try:
+                                        table_data, table_type = extractor.extract_table(page_img, field_name)
+                                        if table_data is not None and table_type is not None:
+                                            all_results[field_name] = json.dumps(table_data, ensure_ascii=False)
+                                            sig = {"source": "table", "flags": [], "page": page_idx + 1, "type": table_type}
+                                            if table_type == "table" and isinstance(table_data, list):
+                                                sig["rows"] = len(table_data)
+                                                sig["cols"] = len(table_data[0]) if table_data else 0
+                                            elif table_type == "column" and isinstance(table_data, list):
+                                                sig["count"] = len(table_data)
+                                            all_signals[field_name] = sig
+                                            print(f"   📊 ✅ '{field_name}' → {table_type} (page {page_idx + 1})")
+                                            break
+                                    except Exception as e:
+                                        print(f"   📊 Table attempt failed for '{field_name}' page {page_idx+1}: {e}")
+                                if field_name not in all_results:
+                                    all_results[field_name] = ""
+                                    all_signals[field_name] = {"source": "table", "flags": ["not_found"], "page": 1}
+                                    print(f"   📊 '{field_name}' — no table found")
+                        
+                        # ─── Normal field extraction ───
+                        field_labels_for_extract = normal_fields
+                        
+                        for page_idx in range(num_pages):
+                            page_num = page_idx + 1
+                            page_img = enhanced_images[page_idx]
+                            raw_img = raw_images[page_idx] if page_idx < len(raw_images) else page_img
                             
-                            for page_idx in table_pages:
-                                page_img = enhanced_images[page_idx]
-                                try:
-                                    table_data, table_type = extractor.extract_table(page_img, field_name)
-                                    if table_data is not None and table_type is not None:
-                                        all_results[field_name] = json.dumps(table_data, ensure_ascii=False)
-                                        sig = {"source": "table", "flags": [], "page": page_idx + 1, "type": table_type}
-                                        if table_type == "table" and isinstance(table_data, list):
-                                            sig["rows"] = len(table_data)
-                                            sig["cols"] = len(table_data[0]) if table_data else 0
-                                        elif table_type == "column" and isinstance(table_data, list):
-                                            sig["count"] = len(table_data)
-                                        all_signals[field_name] = sig
-                                        print(f"   📊 ✅ '{field_name}' → {table_type} (page {page_idx + 1})")
-                                        break
-                                except Exception as e:
-                                    print(f"   📊 Table attempt failed for '{field_name}' page {page_idx+1}: {e}")
-                            if field_name not in all_results:
-                                all_results[field_name] = ""
-                                all_signals[field_name] = {"source": "table", "flags": ["not_found"], "page": 1}
-                                print(f"   📊 '{field_name}' — no table found")
-                    
-                    # ─── Normal field extraction ───
-                    field_labels_for_extract = normal_fields
-                    
-                    for page_idx in range(num_pages):
-                        page_num = page_idx + 1
-                        page_img = enhanced_images[page_idx]
-                        raw_img = raw_images[page_idx] if page_idx < len(raw_images) else page_img
-                        
-                        # Skip pages for fields already found (optimization)
-                        remaining_fields = [f for f in field_labels_for_extract if not all_results.get(f, "").strip()]
-                        if not remaining_fields and page_num > 1:
-                            print(f"   ✅ All fields found — skipping page {page_num}/{num_pages}")
-                            continue
-                        
-                        # On first page, extract all fields. On subsequent pages, only missing ones.
-                        extract_fields_for_page = field_labels_for_extract if page_num == 1 else remaining_fields
-                        if not extract_fields_for_page:
-                            continue
-                        
-                        print(f"\n   📄 Page {page_num}/{num_pages}: extracting {len(extract_fields_for_page)} fields...")
-                        page_results = extractor.extract(
-                            page_img, [], [], extract_fields_for_page,
-                            ocr_source="none",
-                            voting_rounds=voting_rounds,
-                        )
-                        page_signals = extractor.get_last_signals()
-                        
-                        # Merge: first non-empty value wins per field
-                        for field in extract_fields_for_page:
-                            value = page_results.get(field, "")
-                            if value.strip() and not all_results.get(field, "").strip():
-                                all_results[field] = value
-                                all_signals[field] = {
-                                    **page_signals.get(field, {"source": "batch", "flags": []}),
-                                    "page": page_num,
-                                }
-                            elif field not in all_results:
-                                all_results[field] = value
-                                all_signals[field] = {
-                                    **page_signals.get(field, {"source": "batch", "flags": ["empty_value"]}),
-                                    "page": page_num,
-                                }
+                            # Skip pages for fields already found (optimization)
+                            remaining_fields = [f for f in field_labels_for_extract if not all_results.get(f, "").strip()]
+                            if not remaining_fields and page_num > 1:
+                                print(f"   ✅ All fields found — skipping page {page_num}/{num_pages}")
+                                continue
+                            
+                            # On first page, extract all fields. On subsequent pages, only missing ones.
+                            extract_fields_for_page = field_labels_for_extract if page_num == 1 else remaining_fields
+                            if not extract_fields_for_page:
+                                continue
+                            
+                            print(f"\n   📄 Page {page_num}/{num_pages}: extracting {len(extract_fields_for_page)} fields...")
+                            page_results = extractor.extract(
+                                page_img, [], [], extract_fields_for_page,
+                                ocr_source="none",
+                                voting_rounds=voting_rounds,
+                            )
+                            page_signals = extractor.get_last_signals()
+                            
+                            # Merge: first non-empty value wins per field
+                            for field in extract_fields_for_page:
+                                value = page_results.get(field, "")
+                                if value.strip() and not all_results.get(field, "").strip():
+                                    all_results[field] = value
+                                    all_signals[field] = {
+                                        **page_signals.get(field, {"source": "batch", "flags": []}),
+                                        "page": page_num,
+                                    }
+                                elif field not in all_results:
+                                    all_results[field] = value
+                                    all_signals[field] = {
+                                        **page_signals.get(field, {"source": "batch", "flags": ["empty_value"]}),
+                                        "page": page_num,
+                                    }
                     
                     # ─── Auto-detect checkbox fields (run on raw images) ───
                     model_signals = all_signals
@@ -546,6 +598,7 @@ async def extract_fields(
             )
         
         t_elapsed = time.time() - t_start
+        _set_progress(9, 10, "Validating and scoring...")
         print(f"✅ Extraction complete in {t_elapsed:.1f}s ({num_pages} page(s))")
 
         # Save extraction context (first page image for training)
@@ -618,13 +671,46 @@ async def extract_fields(
             if norm != raw:
                 normalized_values[field_name] = norm
 
+        # ─── Compute per-field confidence scores ───
+        confidence_scores = {}
+        for field_name, sig in model_signals.items():
+            source = sig.get("source", "unknown")
+            flags = sig.get("flags", [])
+            
+            # Base score by extraction source
+            base_scores = {
+                "batch": 0.95,
+                "multipage": 0.90,
+                "table": 0.90,
+                "checkbox_vlm": 0.85,
+                "checkbox_zoom": 0.80,
+                "single_field": 0.75,
+                "fallback_recovery": 0.60,
+                "zoom": 0.50,
+                "unknown": 0.50,
+            }
+            score = base_scores.get(source, 0.50)
+            
+            # Penalty for flags
+            if "voting_disagreed" in flags:
+                score -= 0.25
+            if "empty_value" in flags:
+                score -= 0.30
+            if "vqa_fallback" in flags:
+                score -= 0.15
+            if "not_found" in flags:
+                score = 0.0
+            
+            # Clamp 0-1
+            confidence_scores[field_name] = round(max(0.0, min(1.0, score)), 2)
+        
         response_data = {
             **results,
             "_meta": {
                 "extraction_model": model,
                 "time_seconds": round(t_elapsed, 1),
                 "total_pages": num_pages,
-                "signals": {k: {**{"source": v.get("source", "unknown"), "flags": v.get("flags", []), "page": v.get("page", 1)}, **({kk: vv for kk, vv in v.items() if kk not in ("source", "flags", "page")})} for k, v in model_signals.items()},
+                "confidence": confidence_scores,
                 "flagged_fields": flagged_fields,
                 "auto_flagged_count": len(flagged_fields),
                 "validation_errors": validation_errors,
@@ -632,6 +718,8 @@ async def extract_fields(
             }
         }
         
+        _set_progress(10, 10, "Done!")
+        _clear_progress()
         return ExtractionResponse(
             success=True,
             data=response_data,
@@ -877,10 +965,16 @@ async def ask_question(
     file: UploadFile = File(...),
     question: str = Form(...),
     model: str = Form("qwen"),
+    history: str = Form("[]"),
 ):
     """
     Ask a natural language question about a PDF document.
-    Independent from field extraction — uses VQA for ad-hoc queries.
+    
+    Enhanced: sends all pages (up to 5) for cross-page context.
+    Accepts conversation history for follow-up questions.
+    
+    Args:
+        history: JSON string of [{"role": "user"|"assistant", "content": "..."}]
     """
     try:
         if not is_supported_file(file.filename):
@@ -897,6 +991,12 @@ async def ask_question(
         if not _qwen2vl_available:
             raise HTTPException(status_code=503, detail="Qwen2-VL not available")
         
+        # Parse conversation history
+        try:
+            conv_history = json.loads(history) if history else []
+        except (json.JSONDecodeError, TypeError):
+            conv_history = []
+        
         # Process PDF → images (cached, multi-page)
         try:
             enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
@@ -908,23 +1008,15 @@ async def ask_question(
         num_pages = len(enhanced_images)
         t_start = time.time()
         
-        # Try each page sequentially until we get a real answer
+        # Send all pages (up to 5) in a single multi-page VLM call
         try:
             async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
                 async with _gpu_semaphore:
                     qwen = Qwen2VLExtractor()
-                    answer = ""
-                    answer_page = 1
-                    for page_idx, page_img in enumerate(enhanced_images):
-                        page_answer = qwen.ask_question(page_img, question.strip())
-                        if page_answer and "NOT_FOUND_IN_DOCUMENT" not in page_answer.upper() and "NOT_DOCUMENT_RELATED" not in page_answer.upper():
-                            answer = page_answer
-                            answer_page = page_idx + 1
-                            break
-                    if not answer:
-                        # Use the last page's answer (which might be a sentinel)
-                        answer = page_answer if 'page_answer' in dir() else ""
-                        
+                    answer = qwen.ask_question_multipage(
+                        enhanced_images, question.strip(), history=conv_history
+                    )
+                    
         except TimeoutError:
             raise HTTPException(
                 status_code=503,
@@ -949,7 +1041,6 @@ async def ask_question(
             "success": True,
             "answer": answer,
             "answer_type": answer_type,
-            "answer_page": answer_page if answer_type == "answer" else None,
             "total_pages": num_pages,
             "time_seconds": round(t_elapsed, 1),
         }
@@ -958,6 +1049,142 @@ async def ask_question(
         raise
     except Exception as e:
         print(f"❌ Q&A error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ─── CSV Export ───
+
+@app.post("/api/export-csv")
+async def export_csv(request: Request):
+    """
+    Convert extraction results to CSV format.
+    
+    Accepts JSON body: {"data": {"field1": "value1", ...}, "filename": "doc.pdf"}
+    Returns CSV file download.
+    """
+    import csv
+    import io
+    
+    try:
+        body = await request.json()
+        data = body.get("data", {})
+        filename = body.get("filename", "extraction").replace(".pdf", "").replace(".png", "")
+        
+        if not data:
+            raise HTTPException(status_code=400, detail="No data to export")
+        
+        # Filter out _meta
+        export_data = {k: v for k, v in data.items() if k != "_meta"}
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Header row
+        writer.writerow(["Field", "Value"])
+        
+        # Data rows
+        for field, value in export_data.items():
+            writer.writerow([field, value])
+        
+        csv_content = output.getvalue()
+        
+        from fastapi.responses import Response
+        return Response(
+            content=csv_content,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}_extraction.csv"'
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Document Classification ───
+
+@app.post("/api/classify")
+async def classify_document(
+    file: UploadFile = File(...),
+):
+    """
+    Classify document type and suggest relevant fields using VLM.
+    
+    No hardcoded templates — the model dynamically analyzes the document
+    and suggests what fields to extract.
+    
+    Returns:
+        {doc_type: str, suggested_fields: [str], confidence: float}
+    """
+    try:
+        if not is_supported_file(file.filename):
+            raise HTTPException(status_code=400, detail="Only PDF and image files supported")
+        
+        pdf_bytes = await file.read()
+        if len(pdf_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+        
+        if not _qwen2vl_available:
+            raise HTTPException(status_code=503, detail="Qwen2-VL not available")
+        
+        try:
+            enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not enhanced_images:
+            raise HTTPException(status_code=400, detail="Could not process document")
+        
+        t_start = time.time()
+        
+        try:
+            async with asyncio.timeout(_GPU_TIMEOUT_SECONDS):
+                async with _gpu_semaphore:
+                    qwen = Qwen2VLExtractor()
+                    
+                    # Use first page for classification
+                    system_prompt = (
+                        "You are a document classification expert. "
+                        "Analyze the document image and determine: "
+                        "1. What type of document it is (e.g., medical form, invoice, lab report, insurance claim, tax form, etc.) "
+                        "2. A list of 5-15 specific field names that should be extracted from this document. "
+                        "Return ONLY valid JSON."
+                    )
+                    user_prompt = (
+                        "Classify this document and suggest fields to extract. "
+                        'Return JSON: {"doc_type": "Document Type", "suggested_fields": ["Field 1", "Field 2", ...]}'
+                    )
+                    
+                    raw = qwen._multipage_extract(
+                        enhanced_images[:1], system_prompt, user_prompt, max_tokens=512
+                    )
+                    
+        except TimeoutError:
+            raise HTTPException(status_code=503, detail="GPU busy — try again")
+        
+        t_elapsed = time.time() - t_start
+        
+        # Parse classification result
+        try:
+            repaired = Qwen2VLExtractor._repair_json(raw)
+            result = json.loads(repaired)
+            doc_type = result.get("doc_type", "Unknown")
+            fields = result.get("suggested_fields", [])
+        except (json.JSONDecodeError, ValueError):
+            doc_type = "Unknown"
+            fields = []
+        
+        return {
+            "success": True,
+            "doc_type": doc_type,
+            "suggested_fields": fields,
+            "time_seconds": round(t_elapsed, 1),
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Classification error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
