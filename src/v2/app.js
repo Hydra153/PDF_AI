@@ -631,24 +631,40 @@ function renderApp() {
     }
   });
 
-  // Paste support (Ctrl+V images and PDFs)
-  // Only triggers when NOT focused on a text input (chat, field input, etc.)
-  document.addEventListener("paste", async (e) => {
-    const active = document.activeElement;
-    const isTyping = active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable);
-    if (isTyping) return; // Don't hijack paste while typing
+  // Paste support — only works when hovering over the drop zone
+  let _hoveringDropZone = false;
+  dropZone.addEventListener("mouseenter", () => { _hoveringDropZone = true; });
+  dropZone.addEventListener("mouseleave", () => { _hoveringDropZone = false; });
 
+  document.addEventListener("paste", async (e) => {
     const items = e.clipboardData?.items;
     if (!items) return;
+
+    // Check if clipboard has an image/file
+    let pastedFile = null;
     for (const item of items) {
       if (item.kind === "file") {
         const file = item.getAsFile();
         if (file && isSupportedFile(file)) {
-          e.preventDefault();
-          await handleFileSelect(file);
-          return;
+          pastedFile = file;
+          break;
         }
       }
+    }
+    if (!pastedFile) return;
+
+    // Only accept if hovering over drop zone
+    if (_hoveringDropZone) {
+      e.preventDefault();
+      await handleFileSelect(pastedFile);
+    } else {
+      // Show toast hint
+      e.preventDefault();
+      const toast = document.createElement("div");
+      toast.textContent = "📋 Hover over the file area to paste a document";
+      toast.style.cssText = "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1e293b;color:#fff;padding:10px 20px;border-radius:10px;font-size:0.82rem;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.2);animation:fadeIn 0.2s ease;";
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3000);
     }
   });
 
