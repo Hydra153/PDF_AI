@@ -6,15 +6,17 @@ Applies image enhancement for scanned documents when enabled.
 """
 import io
 from typing import List, Dict, Tuple
+from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 import fitz  # PyMuPDF
 
 from config import ENHANCE_SCANNED_IMAGES
 
 # Render DPI for PDF → Image conversion
-# 300 DPI is the OCR industry standard. Higher values get downscaled
-# by the processor's smart_resize() anyway (max_pixels ≈ 1.3M).
-DPI = 300
+# Qwen2.5-VL's smart_resize() downscales to max_pixels (~1.3M) regardless.
+# At 300 DPI an A4 page = 8.7M pixels, 89% wasted. At 200 DPI = 3.9M pixels,
+# still downscaled to ~1.3M but saves ~55% processing time and ~60% RAM.
+DPI = 200
 
 # Supported file extensions
 SUPPORTED_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.webp'}
@@ -85,14 +87,19 @@ def process_pdf(pdf_bytes: bytes) -> Tuple[List[Image.Image], List[Dict]]:
     
     print(f"📄 Converted PDF to {len(images)} page image(s) at {DPI} DPI")
     
-    # ── Image Enhancement for Scanned Documents ──
+    # ── Image Enhancement for Scanned Documents (concurrent) ──
     if ENHANCE_SCANNED_IMAGES:
         from utils.image_enhancer import enhance_for_extraction
-        enhanced_images = []
-        for i, img in enumerate(images):
-            print(f"   📄 Page {i+1}: analyzing scan quality...")
-            enhanced_images.append(enhance_for_extraction(img))
-        images = enhanced_images
+        num = len(images)
+        if num == 1:
+            print(f"   📄 Page 1: enhancing...")
+            images = [enhance_for_extraction(images[0])]
+        else:
+            print(f"   📄 Enhancing {num} pages concurrently...")
+            max_workers = min(num, 4)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                images = list(pool.map(enhance_for_extraction, images))
+            print(f"   ✅ All {num} pages enhanced")
     
     return images, []
 

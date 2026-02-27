@@ -37,7 +37,7 @@ from training_collector import get_training_collector
 # ─── Qwen2-VL Model ───
 _qwen2vl_available = False
 try:
-    from models.qwen2vl_extractor import Qwen2VLExtractor, unload_qwen2vl_model
+    from models.qwen2vl_extractor import Qwen2VLExtractor, unload_qwen2vl_model, get_qwen2vl_model
     _qwen2vl_available = True
     print(f"✅ {QWEN2VL_DISPLAY_NAME} available")
 except ImportError as e:
@@ -110,6 +110,18 @@ def _clear_progress():
 @app.get("/api/progress")
 async def get_progress():
     return _extraction_progress
+
+# ─── Model Warmup on Startup ───
+@app.on_event("startup")
+async def warmup_model():
+    """Pre-load VLM model during server startup to eliminate cold-start latency."""
+    if _qwen2vl_available:
+        print("\n🔥 Warming up VLM model...")
+        try:
+            await asyncio.to_thread(get_qwen2vl_model)
+            print("✅ Model warm and ready!\n")
+        except Exception as e:
+            print(f"⚠️ Warmup failed (will load on first request): {e}\n")
 
 # ─── Image Cache (multi-page) ───
 # Caches processed (enhanced) and raw images per PDF to avoid redundant
@@ -294,10 +306,12 @@ async def extract_fields(
         
         # Process PDF → Images (cached, multi-page)
         t_start = time.time()
-        _set_progress(1, 10, "Processing PDF...")
+        _set_progress(1, 10, "Processing document...")
         print(f"📄 Processing PDF: {file.filename} (model: {model})")
         try:
-            enhanced_images, raw_images = get_or_process_file(pdf_bytes, file.filename, need_raw=True)
+            enhanced_images, raw_images = await asyncio.to_thread(
+                get_or_process_file, pdf_bytes, file.filename, True
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         
@@ -307,10 +321,10 @@ async def extract_fields(
         if not raw_images:
             raw_images = enhanced_images
         
-        # DEV: Raw mode — bypass enhancement, feed raw images directly to VLM
+        # Color Document mode — bypass enhancement, feed raw images directly to VLM
         use_raw = raw_mode.lower() == "true"
         if use_raw:
-            print(f"   🔧 DEV RAW MODE — skipping image enhancement, using raw images")
+            print(f"   🎨 Color Document mode — using raw images")
             enhanced_images = raw_images
         
         num_pages = len(enhanced_images)
@@ -356,6 +370,7 @@ async def extract_fields(
                         detected_columns = {}  # normalized_col_name → (original_col_name, page_idx)
                         detected_row_prefix = None  # e.g. "SL."
                         
+                        _set_progress(3, 10, "Scanning table structure...")
                         for page_idx in range(num_pages):
                             scan = extractor.scan_table_structure(enhanced_images[page_idx])
                             page_table_scans[page_idx] = scan
@@ -455,6 +470,7 @@ async def extract_fields(
                             if not extract_fields_for_page:
                                 continue
                             
+                            _set_progress(3 + page_idx, 10, f"Extracting fields — page {page_num}/{num_pages}...")
                             print(f"\n   📄 Page {page_num}/{num_pages}: extracting {len(extract_fields_for_page)} fields...")
                             page_results = extractor.extract(
                                 page_img, [], [], extract_fields_for_page,
@@ -479,6 +495,7 @@ async def extract_fields(
                                         "page": page_num,
                                     }
                     
+                    _set_progress(7, 10, "Detecting checkboxes...")
                     # ─── Auto-detect checkbox fields (run on raw images) ───
                     model_signals = all_signals
                     results = all_results
@@ -750,7 +767,9 @@ async def auto_find_fields(file: UploadFile = File(...)):
         
         print(f"📄 Auto-detecting fields in: {file.filename}")
         try:
-            enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
+            enhanced_images, _ = await asyncio.to_thread(
+                get_or_process_file, pdf_bytes, file.filename
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         
@@ -888,7 +907,9 @@ async def find_tables(file: UploadFile = File(...)):
         print(f"📊 Finding tables in: {file.filename}")
         
         try:
-            enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
+            enhanced_images, _ = await asyncio.to_thread(
+                get_or_process_file, pdf_bytes, file.filename
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         
@@ -1001,7 +1022,9 @@ async def ask_question(
         # Process file → images
         use_raw = raw_mode.lower() == "true"
         try:
-            enhanced_images, raw_images = get_or_process_file(pdf_bytes, file.filename, need_raw=use_raw)
+            enhanced_images, raw_images = await asyncio.to_thread(
+                get_or_process_file, pdf_bytes, file.filename, use_raw
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         
@@ -1134,7 +1157,9 @@ async def classify_document(
             raise HTTPException(status_code=503, detail="Qwen2-VL not available")
         
         try:
-            enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
+            enhanced_images, _ = await asyncio.to_thread(
+                get_or_process_file, pdf_bytes, file.filename
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         if not enhanced_images:
@@ -1220,7 +1245,9 @@ async def re_extract_field(
         
         # Process PDF → images (cached, multi-page)
         try:
-            enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
+            enhanced_images, _ = await asyncio.to_thread(
+                get_or_process_file, pdf_bytes, file.filename
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         if not enhanced_images:
