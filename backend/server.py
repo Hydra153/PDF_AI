@@ -997,15 +997,18 @@ async def ask_question(
         except (json.JSONDecodeError, TypeError):
             conv_history = []
         
-        # Process PDF → images (cached, multi-page)
+        # Process file → images (use RAW for Q&A so photos/pasted images aren't destroyed by binarization)
         try:
-            enhanced_images, _ = get_or_process_file(pdf_bytes, file.filename)
+            enhanced_images, raw_images = get_or_process_file(pdf_bytes, file.filename, need_raw=True)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        if not enhanced_images:
-            raise HTTPException(status_code=400, detail="Could not process PDF")
         
-        num_pages = len(enhanced_images)
+        # Prefer raw images for Q&A (enhancement is for extraction, not visual understanding)
+        qa_images = raw_images if raw_images else enhanced_images
+        if not qa_images:
+            raise HTTPException(status_code=400, detail="Could not process file")
+        
+        num_pages = len(qa_images)
         t_start = time.time()
         
         # Send all pages (up to 5) in a single multi-page VLM call
@@ -1014,7 +1017,7 @@ async def ask_question(
                 async with _gpu_semaphore:
                     qwen = Qwen2VLExtractor()
                     answer = qwen.ask_question_multipage(
-                        enhanced_images, question.strip(), history=conv_history
+                        qa_images, question.strip(), history=conv_history
                     )
                     
         except TimeoutError:
