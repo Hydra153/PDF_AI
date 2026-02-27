@@ -611,7 +611,7 @@ body.dark .theme-toggle:hover {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 260px;
+  max-height: 340px;
   overflow-y: auto;
 }
 
