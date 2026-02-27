@@ -108,9 +108,13 @@ function renderApp() {
                 <span class="info-tooltip-text">3× voting passes — slower but more accurate</span>
               </span>
             </label>
-            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; opacity: 0.7;">
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
               <input type="checkbox" id="raw-mode-checkbox" style="accent-color: #e67e22; width: 14px; height: 14px;" />
-              <span style="font-weight: 500; font-size: 11px; color: #e67e22;">🔧 Raw Image (Dev)</span>
+              <span style="font-weight: 500; font-size: 11px;">🎨 Color Document</span>
+              <span class="info-tooltip" style="position: relative; display: inline-flex; align-items: center; cursor: help;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                <span class="info-tooltip-text">Enable for color forms, photos, or highlighted docs. Disables B&W conversion.</span>
+              </span>
             </label>
           </div>
           <div class="actions" style="margin-top: 12px;">
