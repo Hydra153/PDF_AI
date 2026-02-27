@@ -76,6 +76,26 @@ function renderApp() {
         </div>
       </section>
 
+      <!-- Global Settings (applies to ALL extractions) -->
+      <div id="global-settings" class="panel" style="padding: 8px 14px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; background: var(--surface, #f8fafc); border: 1px solid var(--border, #e2e8f0); border-radius: 10px; margin-bottom: 2px;">
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+          <input type="checkbox" id="voting-checkbox" style="accent-color: #4a90e2; width: 16px; height: 16px;" />
+          <span style="font-weight: 500; font-size: 13px;">Accuracy Boost</span>
+          <span class="info-tooltip" style="position: relative; display: inline-flex; align-items: center; cursor: help;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            <span class="info-tooltip-text">3× voting passes — slower but more accurate</span>
+          </span>
+        </label>
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+          <input type="checkbox" id="raw-mode-checkbox" style="accent-color: #e67e22; width: 14px; height: 14px;" />
+          <span style="font-weight: 500; font-size: 11px;">🎨 Color Document</span>
+          <span class="info-tooltip" style="position: relative; display: inline-flex; align-items: center; cursor: help;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            <span class="info-tooltip-text">Enable for color forms, photos, or highlighted docs. Disables B&W conversion.</span>
+          </span>
+        </label>
+      </div>
+
       <div id="extraction-wrapper" class="panel" style="padding: 10px; overflow: visible; display: flex; flex-direction: column; gap: 2px;">
 
       <!-- Extraction Tab Bar -->
@@ -98,24 +118,6 @@ function renderApp() {
                 <button id="presets-btn" type="button" class="presets-btn">⚙ Presets</button>
                 <div id="presets-dropdown" class="presets-dropdown" style="display:none;"></div>
               </div>
-          </div>
-          <div id="voting-option" style="margin-top: 12px; padding: 6px 12px; background: rgba(74, 144, 226, 0.04); border: 1px solid rgba(74, 144, 226, 0.12); border-radius: 8px; width: fit-content; display: flex; gap: 16px; align-items: center;">
-            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-              <input type="checkbox" id="voting-checkbox" style="accent-color: #4a90e2; width: 16px; height: 16px;" />
-              <span style="font-weight: 500; font-size: 13px;">Accuracy Boost</span>
-              <span class="info-tooltip" style="position: relative; display: inline-flex; align-items: center; cursor: help;">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-                <span class="info-tooltip-text">3× voting passes — slower but more accurate</span>
-              </span>
-            </label>
-            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-              <input type="checkbox" id="raw-mode-checkbox" style="accent-color: #e67e22; width: 14px; height: 14px;" />
-              <span style="font-weight: 500; font-size: 11px;">🎨 Color Document</span>
-              <span class="info-tooltip" style="position: relative; display: inline-flex; align-items: center; cursor: help;">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-                <span class="info-tooltip-text">Enable for color forms, photos, or highlighted docs. Disables B&W conversion.</span>
-              </span>
-            </label>
           </div>
           <div class="actions" style="margin-top: 12px;">
              <button id="extract-btn" disabled>Extract Data</button>
@@ -164,6 +166,21 @@ function renderApp() {
       </div>
 
       </div>
+
+      <!-- Unified Final Export Bar (below tabs, above doc preview) -->
+      <div id="final-export-bar" class="panel" style="padding: 10px 14px; display: none; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--surface, #f8fafc); border: 1px solid var(--border, #e2e8f0); border-radius: 10px; margin-bottom: 2px;">
+        <button id="copy-final-json" class="btn-secondary" style="font-weight: 600; padding: 7px 16px; font-size: 0.82rem; display: flex; align-items: center; gap: 6px;">${icons.copy(14)} Copy Final JSON</button>
+        <div style="position: relative; display: inline-block;">
+          <button id="final-export-dropdown-btn" class="btn-secondary" style="background: #27ae60; color: #fff; padding: 7px 16px; font-size: 0.82rem; font-weight: 600;">${icons.download(14)} Export ▾</button>
+          <div id="final-export-dropdown-menu" style="display: none; position: absolute; bottom: 100%; left: 0; z-index: 100; background: var(--surface, #fff); border: 1px solid var(--border, #e2e8f0); border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); min-width: 140px; margin-bottom: 4px; overflow: hidden;">
+            <button id="final-download-json" style="display: block; width: 100%; text-align: left; padding: 8px 14px; border: none; background: none; cursor: pointer; font-size: 0.82rem; color: var(--text, #1e293b);" onmouseover="this.style.background='var(--surface-hover, #f1f5f9)'" onmouseout="this.style.background='none'">${icons.file(14)} JSON</button>
+            <button id="final-export-csv" style="display: block; width: 100%; text-align: left; padding: 8px 14px; border: none; background: none; cursor: pointer; font-size: 0.82rem; color: var(--text, #1e293b);" onmouseover="this.style.background='var(--surface-hover, #f1f5f9)'" onmouseout="this.style.background='none'">${icons.table ? icons.table(14) : '▇'} CSV</button>
+          </div>
+        </div>
+        <button id="toggle-final-json" class="btn-secondary" style="padding: 7px 14px; font-size: 0.82rem;">${icons.eye(14)} View JSON</button>
+        <span id="final-export-hint" style="font-size: 0.72rem; color: var(--text-muted, #94a3b8); margin-left: auto;">Combines fields + checkboxes + tables</span>
+      </div>
+      <pre id="final-json-output" class="json-code" style="display: none;"></pre>
 
       <section class="panel">
         <label class="label">Document Preview</label>
@@ -217,6 +234,161 @@ function renderApp() {
   let checkboxEnabled = true;  // Checkbox detection always on
   let currentPage = 1;         // Current preview page (1-based)
   let totalPageCount = 1;      // Total pages in current document
+
+  // ─── Build Final Combined JSON ───
+  function buildFinalJSON() {
+    const output = {};
+
+    // Fields section
+    const fieldsData = {};
+    for (const [k, v] of Object.entries(currentExtractionData || {})) {
+      if (k === "_meta") continue;
+      fieldsData[k] = v;
+    }
+    if (Object.keys(fieldsData).length > 0) {
+      output.fields = fieldsData;
+    }
+
+    // Formatted section (decomposed fields)
+    const formattedData = {};
+    for (const [k, v] of Object.entries(currentExtractionData || {})) {
+      if (k === "_meta") continue;
+      const decomposed = decomposeField(k, v);
+      if (decomposed) {
+        const sub = {};
+        for (const part of decomposed) {
+          sub[part.label] = part.value;
+        }
+        formattedData[k] = sub;
+      }
+    }
+    if (Object.keys(formattedData).length > 0) {
+      output.formatted = formattedData;
+    }
+
+    // Checkboxes section
+    if (lastCheckboxResults && lastCheckboxResults.length > 0) {
+      output.checkboxes = {};
+      lastCheckboxResults.forEach(cb => {
+        output.checkboxes[cb.label] = cb.checked ? "Checked" : "Unchecked";
+      });
+    }
+
+    // Tables section
+    if (lastTableResults && lastTableResults.length > 0) {
+      output.tables = lastTableResults.map(t => ({
+        name: t.table_name || t.name || "Table",
+        columns: t.columns || [],
+        rows: t.rows_json || t.rows || [],
+      }));
+    }
+
+    return output;
+  }
+
+  // Show/hide the final export bar based on whether data exists
+  function updateFinalExportBar() {
+    const bar = document.getElementById("final-export-bar");
+    if (!bar) return;
+    const hasFields = currentExtractionData && Object.keys(currentExtractionData).some(k => k !== "_meta");
+    const hasCheckboxes = lastCheckboxResults && lastCheckboxResults.length > 0;
+    const hasTables = lastTableResults && lastTableResults.length > 0;
+
+    if (hasFields || hasCheckboxes || hasTables) {
+      bar.style.display = "flex";
+
+      // Update hint with section counts
+      const parts = [];
+      if (hasFields) parts.push("fields");
+      if (hasCheckboxes) parts.push("checkboxes");
+      if (hasTables) parts.push("tables");
+      const hint = document.getElementById("final-export-hint");
+      if (hint) hint.textContent = `Combines: ${parts.join(" + ")}`;
+    } else {
+      bar.style.display = "none";
+    }
+  }
+
+  // Wire Final Export bar buttons
+  (function wireFinalExportBar() {
+    // Copy Final JSON
+    document.getElementById("copy-final-json")?.addEventListener("click", () => {
+      const data = buildFinalJSON();
+      navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+      const btn = document.getElementById("copy-final-json");
+      btn.innerHTML = `${icons.check(14)} Copied!`;
+      setTimeout(() => (btn.innerHTML = `${icons.copy(14)} Copy Final JSON`), 2000);
+    });
+
+    // Export dropdown toggle
+    const expBtn = document.getElementById("final-export-dropdown-btn");
+    const expMenu = document.getElementById("final-export-dropdown-menu");
+    if (expBtn && expMenu) {
+      expBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        expMenu.style.display = expMenu.style.display === "none" ? "block" : "none";
+      });
+      document.addEventListener("click", () => { expMenu.style.display = "none"; });
+    }
+
+    // Download Final JSON
+    document.getElementById("final-download-json")?.addEventListener("click", () => {
+      const data = buildFinalJSON();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = (selectedFile?.name?.replace(/\.[^.]+$/, '') || "extraction") + "_final.json";
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    // Final CSV export (flatten all sections)
+    document.getElementById("final-export-csv")?.addEventListener("click", async () => {
+      const btn = document.getElementById("final-export-csv");
+      try {
+        btn.textContent = "Exporting...";
+        const flat = {};
+        const data = buildFinalJSON();
+        // Flatten fields
+        if (data.fields) Object.assign(flat, data.fields);
+        // Flatten formatted
+        if (data.formatted) {
+          for (const [field, sub] of Object.entries(data.formatted)) {
+            for (const [label, val] of Object.entries(sub)) {
+              flat[`${field} - ${label}`] = val;
+            }
+          }
+        }
+        // Flatten checkboxes
+        if (data.checkboxes) {
+          for (const [label, val] of Object.entries(data.checkboxes)) {
+            flat[`Checkbox: ${label}`] = val;
+          }
+        }
+        await exportCSV(flat, (selectedFile?.name || "extraction") + "_final");
+        btn.innerHTML = `${icons.check(14)} Exported!`;
+        setTimeout(() => { btn.innerHTML = `${icons.table ? icons.table(14) : '▇'} CSV`; }, 2000);
+      } catch (err) {
+        btn.textContent = "Failed";
+        setTimeout(() => { btn.innerHTML = `${icons.table ? icons.table(14) : '▇'} CSV`; }, 2000);
+      }
+    });
+
+    // Toggle Final JSON view
+    document.getElementById("toggle-final-json")?.addEventListener("click", () => {
+      const jsonOut = document.getElementById("final-json-output");
+      const btn = document.getElementById("toggle-final-json");
+      if (jsonOut.style.display === "none") {
+        jsonOut.textContent = JSON.stringify(buildFinalJSON(), null, 2);
+        jsonOut.style.display = "block";
+        btn.innerHTML = `${icons.x(14)} Hide JSON`;
+      } else {
+        jsonOut.style.display = "none";
+        btn.innerHTML = `${icons.eye(14)} View JSON`;
+      }
+    });
+  })();
 
   // Tab Navigation (Extract / Review)
   const tabExtract = document.getElementById("tab-extract");
@@ -705,6 +877,7 @@ function renderApp() {
     lastCheckboxResults = null;
     lastTableResults = null;
     currentExtractionData = {};
+    updateFinalExportBar();
 
     // Clear fields from previous document
     CURRENT_FIELDS = [];
@@ -778,6 +951,7 @@ function renderApp() {
       lastCheckboxResults = result.checkboxes;
       renderCheckboxResults(result.checkboxes, result.time_seconds);
       statusEl.textContent = `Found ${result.checkboxes.length} checkboxes in ${result.time_seconds}s`;
+      updateFinalExportBar();
 
     } catch (err) {
       console.error("Checkbox detection error:", err);
@@ -818,6 +992,7 @@ function renderApp() {
       renderTableScanResults(result.tables, result.total_pages, result.time_seconds);
       lastTableResults = result.tables;
       statusEl.textContent = `Found ${result.count} table(s) across ${result.total_pages} page(s) in ${result.time_seconds}s`;
+      updateFinalExportBar();
 
     } catch (err) {
       console.error("Table scan error:", err);
@@ -1494,6 +1669,7 @@ function renderApp() {
 
   function renderResults(container, data) {
     currentExtractionData = { ...data };
+    updateFinalExportBar();
 
     if (!data || Object.keys(data).length === 0) {
       container.innerHTML = `
