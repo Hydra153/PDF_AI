@@ -1431,7 +1431,7 @@ function renderApp() {
       }
     }
 
-    // Address: multi-line or "STREET, CITY, STATE ZIP"
+    // Address: multi-line or "STREET CITY, STATE ZIP"
     if (fLower.includes("address") || fLower.includes("location")) {
       // Multi-line address
       const lines = value.split(/\n|\\n/).map(l => l.trim()).filter(Boolean);
@@ -1449,13 +1449,24 @@ function renderApp() {
         }
         return lines.map((l, i) => ({ label: `Line ${i + 1}`, value: l }));
       }
-      // Single-line "CITY, STATE ZIP"
-      const singleLine = value.match(/^(.+?)\s*,\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+      // Single-line: "STREET ADDRESS CITY, STATE ZIP"
+      // Split on the LAST comma before STATE ZIP to separate street from city
+      const singleLine = value.match(/^(.+)\s+([A-Za-z][A-Za-z .]+?)\s*,\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
       if (singleLine) {
         return [
-          { label: "City", value: singleLine[1] },
-          { label: "State", value: singleLine[2] },
-          { label: "Zip", value: singleLine[3] },
+          { label: "Street", value: singleLine[1].replace(/,\s*$/, "") },
+          { label: "City", value: singleLine[2] },
+          { label: "State", value: singleLine[3] },
+          { label: "Zip", value: singleLine[4] },
+        ];
+      }
+      // Fallback: just CITY, STATE ZIP (no street)
+      const cityOnly = value.match(/^([A-Za-z][A-Za-z .]+?)\s*,\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+      if (cityOnly) {
+        return [
+          { label: "City", value: cityOnly[1] },
+          { label: "State", value: cityOnly[2] },
+          { label: "Zip", value: cityOnly[3] },
         ];
       }
     }
@@ -1474,10 +1485,10 @@ function renderApp() {
     return null; // Not a composite field
   }
 
-  // Format decomposed parts as HTML
+  // Format decomposed parts as HTML with visual markers
   function renderDecomposed(parts) {
-    return `<div class="decomposed-parts" style="display: flex; flex-direction: column; gap: 4px; margin-top: 4px;">${
-      parts.map(p => `<div style="display: flex; gap: 6px; align-items: baseline;"><span style="font-size: 0.68rem; color: var(--text-muted, #94a3b8); min-width: 60px; text-align: right;">${p.label}:</span><span style="font-size: 0.82rem; font-weight: 500; color: var(--text, #1e293b);">${p.value}</span></div>`).join("")
+    return `<div class="decomposed-parts" style="display: flex; flex-direction: column; gap: 5px; margin-top: 6px; padding: 8px 10px; background: var(--surface-alt, #f1f5f9); border-radius: 8px; border-left: 3px solid var(--accent, #6366f1);">${
+      parts.map(p => `<div style="display: flex; gap: 8px; align-items: baseline;"><span style="font-size: 0.68rem; color: var(--accent, #6366f1); min-width: 52px; text-align: right; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase;">${p.label}</span><span style="font-size: 0.82rem; font-weight: 500; color: var(--text, #1e293b);">${p.value}</span></div>`).join("")
     }</div>`;
   }
 
@@ -1650,14 +1661,17 @@ function renderApp() {
             const decomposed = decomposeField(field, raw);
             if (decomposed) {
               valueEl.innerHTML = renderDecomposed(decomposed);
+              card.style.borderLeft = "3px solid var(--accent, #6366f1)";
               if (indicator) indicator.style.display = "inline";
             } else if (raw !== normalized) {
               valueEl.textContent = normalized || raw || "—";
+              card.style.borderLeft = "3px solid var(--accent, #6366f1)";
               if (indicator) indicator.style.display = "inline";
             }
           } else {
             // Reset to raw
             valueEl.textContent = raw || "—";
+            card.style.borderLeft = "";
             // Remove any decomposed parts
             const existing = card.querySelector(".decomposed-parts");
             if (existing) existing.remove();
