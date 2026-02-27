@@ -632,7 +632,12 @@ function renderApp() {
   });
 
   // Paste support (Ctrl+V images and PDFs)
+  // Only triggers when NOT focused on a text input (chat, field input, etc.)
   document.addEventListener("paste", async (e) => {
+    const active = document.activeElement;
+    const isTyping = active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable);
+    if (isTyping) return; // Don't hijack paste while typing
+
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {
