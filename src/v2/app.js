@@ -488,19 +488,22 @@ function renderApp() {
     if (headerLabel) { headerLabel.textContent = s.label; headerLabel.style.color = s.color; }
   }
 
-  // ─── Startup: check backend health ───
-  (async () => {
+  // ─── Startup: check backend health (with retry polling) ───
+  let _healthPollTimer = null;
+  async function pollBackendHealth() {
     try {
       const health = await checkBackendHealth();
       if (health) {
         updateStatus("ready");
-      } else {
-        updateStatus("offline");
+        if (_healthPollTimer) { clearInterval(_healthPollTimer); _healthPollTimer = null; }
+        return;
       }
-    } catch {
-      updateStatus("offline");
-    }
-  })();
+    } catch { /* still offline */ }
+    updateStatus("offline");
+  }
+  // Initial check + retry every 3s until backend is up
+  pollBackendHealth();
+  _healthPollTimer = setInterval(pollBackendHealth, 3000);
 
   // Always use Qwen model for chat
   chatPanel.setModel("qwen");
