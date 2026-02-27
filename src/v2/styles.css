@@ -539,7 +539,7 @@ body.dark .theme-toggle:hover {
 
 .presets-dropdown {
   position: absolute;
-  top: calc(100% + 8px);
+  bottom: calc(100% + 8px);
   right: 0;
   min-width: 300px;
   max-width: 380px;
@@ -549,7 +549,7 @@ body.dark .theme-toggle:hover {
   border: 1px solid rgba(0, 0, 0, 0.08);
   border-radius: 14px;
   padding: 12px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.12);
   backdrop-filter: blur(16px);
   z-index: 100;
   animation: presetSlideIn 0.2s ease;
@@ -558,7 +558,7 @@ body.dark .theme-toggle:hover {
 @keyframes presetSlideIn {
   from {
     opacity: 0;
-    transform: translateY(-6px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
