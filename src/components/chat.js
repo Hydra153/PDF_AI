@@ -346,7 +346,8 @@ export function createChat(containerEl) {
       const history = _messages
         .filter(m => m.id !== aiId && m.text !== "__loading__")
         .map(m => ({ role: m.role === "user" ? "user" : "assistant", content: m.text }));
-      const result = await askQuestion(_file, questionText.trim(), _model, history);
+      const rawMode = document.getElementById("raw-mode-checkbox")?.checked || false;
+      const result = await askQuestion(_file, questionText.trim(), _model, history, rawMode);
       const aiMsg = _messages.find(m => m.id === aiId);
       if (aiMsg) {
         aiMsg.text = result.answer;
@@ -406,7 +407,8 @@ export function createChat(containerEl) {
         .slice(0, aiIdx - 1)
         .filter(m => m.text !== "__loading__")
         .map(m => ({ role: m.role === "user" ? "user" : "assistant", content: m.text }));
-      const result = await askQuestion(_file, userMsg.text, _model, history);
+      const rawMode = document.getElementById("raw-mode-checkbox")?.checked || false;
+      const result = await askQuestion(_file, userMsg.text, _model, history, rawMode);
       aiMsg.text = result.answer;
       aiMsg.time = result.time_seconds;
     } catch (err) {

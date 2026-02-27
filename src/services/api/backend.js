@@ -209,13 +209,14 @@ export function findTables(file) {
  * @param {Array} history - Conversation history [{role, content}]
  * @returns {Object} {answer, time_seconds}
  */
-export function askQuestion(file, question, model = "qwen", history = []) {
+export function askQuestion(file, question, model = "qwen", history = [], rawMode = false) {
   return withLock(async () => {
     try {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("question", question);
       formData.append("model", model);
+      formData.append("raw_mode", rawMode ? "true" : "false");
       if (history.length > 0) {
         formData.append("history", JSON.stringify(history));
       }

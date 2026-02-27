@@ -966,6 +966,7 @@ async def ask_question(
     question: str = Form(...),
     model: str = Form("qwen"),
     history: str = Form("[]"),
+    raw_mode: str = Form("false"),
 ):
     """
     Ask a natural language question about a PDF document.
@@ -997,14 +998,15 @@ async def ask_question(
         except (json.JSONDecodeError, TypeError):
             conv_history = []
         
-        # Process file → images (use RAW for Q&A so photos/pasted images aren't destroyed by binarization)
+        # Process file → images
+        use_raw = raw_mode.lower() == "true"
         try:
-            enhanced_images, raw_images = get_or_process_file(pdf_bytes, file.filename, need_raw=True)
+            enhanced_images, raw_images = get_or_process_file(pdf_bytes, file.filename, need_raw=use_raw)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         
-        # Prefer raw images for Q&A (enhancement is for extraction, not visual understanding)
-        qa_images = raw_images if raw_images else enhanced_images
+        # Use raw images when Color Document is toggled (preserves color info)
+        qa_images = raw_images if (use_raw and raw_images) else enhanced_images
         if not qa_images:
             raise HTTPException(status_code=400, detail="Could not process file")
         
