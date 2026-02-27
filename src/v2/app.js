@@ -178,7 +178,7 @@ function renderApp() {
           </div>
         </div>
         <button id="toggle-final-json" class="btn-secondary" style="padding: 7px 14px; font-size: 0.82rem;">${icons.eye(14)} View JSON</button>
-        <span id="final-export-hint" style="font-size: 0.72rem; color: var(--text-muted, #94a3b8); margin-left: auto;">Combines fields + checkboxes + tables</span>
+        <span id="final-export-hint" style="font-size: 0.72rem; color: var(--text-muted, #94a3b8); margin-left: auto;">All extraction results</span>
       </div>
       <pre id="final-json-output" class="json-code" style="display: none;"></pre>
 
@@ -234,6 +234,33 @@ function renderApp() {
   let checkboxEnabled = true;  // Checkbox detection always on
   let currentPage = 1;         // Current preview page (1-based)
   let totalPageCount = 1;      // Total pages in current document
+
+  // ─── Toast Notification Utility ───
+  function showToast(message, type = "info", durationMs = 3500) {
+    const existing = document.querySelectorAll(".toast-notification");
+    existing.forEach(t => t.remove());
+    const colors = {
+      info: { bg: "#1e293b", border: "#475569" },
+      success: { bg: "#065f46", border: "#10b981" },
+      warning: { bg: "#78350f", border: "#f59e0b" },
+      error: { bg: "#7f1d1d", border: "#ef4444" },
+    };
+    const c = colors[type] || colors.info;
+    const toast = document.createElement("div");
+    toast.className = "toast-notification";
+    toast.style.cssText = `position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: ${c.bg}; color: #fff; padding: 10px 22px; border-radius: 10px; font-size: 0.84rem; font-weight: 500; z-index: 9999; border: 1px solid ${c.border}; box-shadow: 0 8px 24px rgba(0,0,0,0.3); opacity: 0; transition: all 0.3s ease;`;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => {
+      toast.style.opacity = "1";
+      toast.style.transform = "translateX(-50%) translateY(0)";
+    });
+    setTimeout(() => {
+      toast.style.opacity = "0";
+      toast.style.transform = "translateX(-50%) translateY(20px)";
+      setTimeout(() => toast.remove(), 300);
+    }, durationMs);
+  }
 
   // ─── Build Final Combined JSON ───
   function buildFinalJSON() {
@@ -296,14 +323,6 @@ function renderApp() {
 
     if (hasFields || hasCheckboxes || hasTables) {
       bar.style.display = "flex";
-
-      // Update hint with section counts
-      const parts = [];
-      if (hasFields) parts.push("fields");
-      if (hasCheckboxes) parts.push("checkboxes");
-      if (hasTables) parts.push("tables");
-      const hint = document.getElementById("final-export-hint");
-      if (hint) hint.textContent = `Combines: ${parts.join(" + ")}`;
     } else {
       bar.style.display = "none";
     }
@@ -899,6 +918,7 @@ function renderApp() {
   autoFindBtn.addEventListener("click", async () => {
     if (!selectedFile) return;
     try {
+      showToast("Analyzing document...", "info");
       statusEl.textContent = "Analyzing document...";
       autoFindBtn.disabled = true;
 
@@ -908,7 +928,8 @@ function renderApp() {
       const result = await classifyDocument(selectedFile);
 
       if (!result.success || !result.suggested_fields?.length) {
-        statusEl.textContent = "No fields detected. Try manual entry.";
+        showToast("No fields detected. Try manual entry.", "warning");
+        statusEl.textContent = "No fields detected";
         autoFindBtn.disabled = false;
         return;
       }
@@ -916,10 +937,12 @@ function renderApp() {
       CURRENT_FIELDS = result.suggested_fields.map(f => ({ key: f, question: "" }));
       renderFields();
 
-      statusEl.textContent = `${result.doc_type} — ${result.suggested_fields.length} fields found (${result.time_seconds}s)`;
+      showToast(`${result.doc_type} — ${result.suggested_fields.length} fields found (${result.time_seconds}s)`, "success");
+      statusEl.textContent = `${result.suggested_fields.length} fields loaded`;
     } catch (err) {
       console.error("Auto-find error:", err);
-      statusEl.textContent = `Error: ${err.message}`;
+      showToast(`Auto-find error: ${err.message}`, "error");
+      statusEl.textContent = "Auto-find failed";
     } finally {
       autoFindBtn.disabled = false;
     }
@@ -932,6 +955,7 @@ function renderApp() {
     try {
       detectCheckboxesBtn.disabled = true;
       detectCheckboxesBtn.textContent = "⏳ Scanning...";
+      showToast("Detecting checkboxes...", "info");
       statusEl.textContent = "Detecting checkboxes...";
       checkboxResultsContainer.innerHTML = `
         <div style="text-align: center; padding: 20px; color: var(--muted);">
@@ -946,21 +970,23 @@ function renderApp() {
           <div style="text-align: center; padding: 20px; color: var(--muted);">
             ☐ No physical checkboxes found in this document
           </div>`;
-        statusEl.textContent = "No checkboxes found";
+        showToast("No checkboxes found in this document", "warning");
         lastCheckboxResults = [];
         return;
       }
 
       lastCheckboxResults = result.checkboxes;
       renderCheckboxResults(result.checkboxes, result.time_seconds);
-      statusEl.textContent = `Found ${result.checkboxes.length} checkboxes in ${result.time_seconds}s`;
+      showToast(`Found ${result.checkboxes.length} checkboxes in ${result.time_seconds}s`, "success");
+      statusEl.textContent = `${result.checkboxes.length} checkboxes detected`;
       updateFinalExportBar();
 
     } catch (err) {
       console.error("Checkbox detection error:", err);
       checkboxResultsContainer.innerHTML = `
         <div style="color: #ef4444; padding: 12px;">❌ ${err.message}</div>`;
-      statusEl.textContent = `Error: ${err.message}`;
+      showToast(`Checkbox error: ${err.message}`, "error");
+      statusEl.textContent = "Checkbox detection failed";
     } finally {
       detectCheckboxesBtn.disabled = false;
       detectCheckboxesBtn.textContent = "☑ Find All Checkboxes";
@@ -974,6 +1000,7 @@ function renderApp() {
     try {
       findTablesBtn.disabled = true;
       findTablesBtn.textContent = "⏳ Scanning...";
+      showToast("Scanning for tables...", "info");
       statusEl.textContent = "Scanning for tables...";
       tableScanResultsContainer.innerHTML = `
         <div style="text-align: center; padding: 20px; color: var(--muted);">
@@ -988,20 +1015,22 @@ function renderApp() {
           <div style="text-align: center; padding: 20px; color: var(--muted);">
             ⊟ No data tables found in this document
           </div>`;
-        statusEl.textContent = "No tables found";
+        showToast("No tables found in this document", "warning");
         return;
       }
 
       renderTableScanResults(result.tables, result.total_pages, result.time_seconds);
       lastTableResults = result.tables;
-      statusEl.textContent = `Found ${result.count} table(s) across ${result.total_pages} page(s) in ${result.time_seconds}s`;
+      showToast(`Found ${result.count} table(s) across ${result.total_pages} page(s) in ${result.time_seconds}s`, "success");
+      statusEl.textContent = `${result.count} table(s) detected`;
       updateFinalExportBar();
 
     } catch (err) {
       console.error("Table scan error:", err);
       tableScanResultsContainer.innerHTML = `
         <div style="color: #ef4444; padding: 12px;">❌ ${err.message}</div>`;
-      statusEl.textContent = `Error: ${err.message}`;
+      showToast(`Table scan error: ${err.message}`, "error");
+      statusEl.textContent = "Table scan failed";
     } finally {
       findTablesBtn.disabled = false;
       findTablesBtn.textContent = "⊞ Find All Tables";
@@ -1103,7 +1132,6 @@ function renderApp() {
       </div>
       <div style="display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap;">
         <button id="copy-table-json" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">📋 Copy JSON</button>
-        <button id="append-table-output" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">🔗 Append to Output</button>
         <button id="download-table-json" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">⬇ Export JSON</button>
       </div>`;
     tableScanResultsContainer.innerHTML = html;
@@ -1126,29 +1154,6 @@ function renderApp() {
       setTimeout(() => { btn.textContent = "📋 Copy JSON"; }, 2000);
     });
 
-    // Append to Output (merge rows as named fields into main results)
-    document.getElementById("append-table-output")?.addEventListener("click", () => {
-      const btn = document.getElementById("append-table-output");
-      if (!lastTableResults || lastTableResults.length === 0) return;
-      const merged = typeof currentExtractionData !== "undefined" ? { ...currentExtractionData } : {};
-      lastTableResults.forEach((t, i) => {
-        const key = `Table ${i + 1} (Page ${t.page})`;
-        merged[key] = JSON.stringify(Array.isArray(t.rows_json) ? t.rows_json : [], null, 2);
-      });
-      currentExtractionData = merged;
-      renderResults(resultsContainer, merged);
-      // Switch to Fields tab so user sees results
-      document.querySelector(".extract-tab[data-tab='fields']")?.click();
-      btn.textContent = "✓ Appended!";
-      btn.style.background = "rgba(34, 197, 94, 0.15)";
-      btn.style.color = "#22c55e";
-      setTimeout(() => {
-        btn.textContent = "🔗 Append to Output";
-        btn.style.background = "";
-        btn.style.color = "";
-      }, 2000);
-      statusEl.textContent = `Table data appended to output`;
-    });
 
     // Export JSON download
     document.getElementById("download-table-json")?.addEventListener("click", () => {
@@ -1173,26 +1178,16 @@ function renderApp() {
         <span>☐ ${unchecked} unchecked</span>
         <span style="margin-left: auto;">${timeSec}s</span>
       </div>
-      <div style="display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
-        <button id="merge-checkboxes-btn" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">🔗 Merge into Results</button>
-        <button id="copy-checkbox-json" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">📋 Copy JSON</button>
-        <button id="download-checkbox-json" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">⬇ Download</button>
-      </div>
       <div class="results-grid">`;
 
     checkboxes.forEach((cb, i) => {
       const icon = cb.checked ? "☑" : "☐";
       const statusText = cb.checked ? "Checked" : "Unchecked";
       const statusColor = cb.checked ? "#22c55e" : "#94a3b8";
-      const cbSignal = cb.signal || {};
-      const cbSource = cbSignal.source || "batch";
-      const sourceIcon = cbSource === "checkbox_vqa" ? "🔍" : "📋";
-
       html += `
         <div class="result-card animate-fadeUp cb-card" data-cb-index="${i}" data-cb-checked="${cb.checked}" style="animation-delay: ${i * 0.03}s; cursor: pointer;" title="Click to toggle">
           <div class="card-header">
             <span class="field-name">${cb.label}</span>
-            <span class="signal-badge">${sourceIcon} ${cbSource}</span>
           </div>
           <div class="field-value" style="display: flex; align-items: center; gap: 8px;">
             <span class="cb-icon" style="font-size: 1.4rem; color: ${statusColor};">${icon}</span>
@@ -1201,7 +1196,11 @@ function renderApp() {
         </div>`;
     });
 
-    html += `</div>`;
+    html += `</div>
+      <div style="display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap;">
+        <button id="copy-checkbox-json" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">📋 Copy JSON</button>
+        <button id="download-checkbox-json" class="btn-secondary" style="font-size: 0.78rem; padding: 6px 14px;">⬇ Download</button>
+      </div>`;
     checkboxResultsContainer.innerHTML = html;
 
     // Wire up toggle on each checkbox card
@@ -1228,42 +1227,6 @@ function renderApp() {
       });
     });
 
-    // Merge into Results button
-    document.getElementById("merge-checkboxes-btn")?.addEventListener("click", () => {
-      if (!lastCheckboxResults || lastCheckboxResults.length === 0) return;
-
-      // Build merged data: existing extraction + checkbox states
-      const mergedData = {};
-      // Add existing extraction data first
-      if (typeof currentExtractionData !== "undefined") {
-        for (const [k, v] of Object.entries(currentExtractionData)) {
-          if (k !== "_meta") mergedData[k] = v;
-        }
-      }
-      // Add checkbox results
-      lastCheckboxResults.forEach(cb => {
-        mergedData[cb.label] = cb.checked ? "Checked" : "Unchecked";
-      });
-
-      // Re-render main results with merged data
-      currentExtractionData = mergedData;
-      renderResults(resultsContainer, mergedData);
-
-      // Visual feedback
-      const btn = document.getElementById("merge-checkboxes-btn");
-      if (btn) {
-        btn.textContent = "✓ Merged!";
-        btn.style.background = "rgba(34, 197, 94, 0.15)";
-        btn.style.color = "#22c55e";
-        setTimeout(() => {
-          btn.textContent = "🔗 Merge into Results";
-          btn.style.background = "";
-          btn.style.color = "";
-        }, 2000);
-      }
-
-      statusEl.textContent = `Merged ${lastCheckboxResults.length} checkboxes into results`;
-    });
 
     // JSON export data
     const getExportData = () => lastCheckboxResults.map(c => ({
@@ -1444,8 +1407,8 @@ function renderApp() {
       // Show progress bar
       resultsContainer.innerHTML = `
         <div id="extraction-progress" class="animate-fadeUp" style="padding: 20px; text-align: center;">
-          <div style="background: var(--border, #e2e8f0); border-radius: 8px; height: 8px; overflow: hidden; margin-bottom: 10px;">
-            <div id="progress-fill" style="background: linear-gradient(90deg, #6366f1, #8b5cf6); height: 100%; width: 0%; border-radius: 8px; transition: width 0.5s ease;"></div>
+          <div style="background: var(--border, #e2e8f0); border-radius: 8px; height: 8px; overflow: hidden; margin-bottom: 10px; position: relative;">
+            <div id="progress-fill" style="background: linear-gradient(90deg, #6366f1, #8b5cf6, #6366f1); background-size: 200% 100%; height: 100%; width: 5%; border-radius: 8px; transition: width 0.4s ease; animation: shimmer 1.5s ease infinite;"></div>
           </div>
           <div id="progress-text" style="font-size: 0.8rem; color: var(--text-muted, #94a3b8);">Starting extraction...</div>
         </div>
@@ -1459,13 +1422,22 @@ function renderApp() {
           const fill = document.getElementById("progress-fill");
           const text = document.getElementById("progress-text");
           if (fill && prog.active) {
-            fill.style.width = `${prog.percent}%`;
+            fill.style.width = `${Math.max(prog.percent, 5)}%`;
           }
           if (text && prog.message) {
             text.textContent = `${prog.message} (${prog.percent}%)`;
           }
+          // Update header status with progress message
+          if (prog.active && prog.message) {
+            statusEl.textContent = prog.message;
+          }
+          // Auto-stop polling when extraction finishes
+          if (!prog.active && progressInterval) {
+            clearInterval(progressInterval);
+            progressInterval = null;
+          }
         } catch { /* ignore polling errors */ }
-      }, 2000);
+      }, 1500);
 
       const votingChecked = document.getElementById("voting-checkbox")?.checked;
       const votingRounds = votingChecked ? 3 : 1;
@@ -1483,12 +1455,25 @@ function renderApp() {
 
       const timeSec = extractedData?._meta?.time_seconds;
       const totalPages = extractedData?._meta?.total_pages || 1;
+      const fieldCount = Object.keys(extractedData).filter(k => k !== "_meta").length;
       renderResults(resultsContainer, extractedData);
-      statusEl.textContent = `Extraction complete!${timeSec ? ` (${timeSec}s` : ""}${totalPages > 1 ? `, ${totalPages} pages` : ""}${timeSec ? ")" : ""}`;
+
+      // Auto-populate Checkboxes tab if checkboxes were detected during extraction
+      const detectedCbs = extractedData?._meta?.detected_checkboxes;
+      if (detectedCbs && detectedCbs.length > 0) {
+        lastCheckboxResults = detectedCbs;
+        renderCheckboxResults(detectedCbs, timeSec);
+        showToast(`Also found ${detectedCbs.length} checkboxes — see Checkboxes tab`, "info", 4000);
+      }
+
+      showToast(`Extraction complete — ${fieldCount} fields in ${timeSec || '?'}s${totalPages > 1 ? ` (${totalPages} pages)` : ''}`, "success");
+      statusEl.textContent = `Extraction complete (${timeSec}s)`;
       updateStatus("ready");
+      updateFinalExportBar();
     } catch (err) {
       console.error("Extraction error:", err);
-      statusEl.textContent = `Error: ${err.message}`;
+      showToast(`Extraction error: ${err.message}`, "error");
+      statusEl.textContent = "Extraction failed";
       updateStatus("ready");
     } finally {
       if (progressInterval) clearInterval(progressInterval);

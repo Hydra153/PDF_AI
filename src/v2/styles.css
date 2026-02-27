@@ -312,6 +312,102 @@ body.dark .extract-tabs {
   background: rgba(255, 255, 255, 0.04);
 }
 
+/* Dark mode: Global settings bar (Accuracy Boost, Color Document) */
+body.dark #global-settings {
+  background: rgba(255, 255, 255, 0.03) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+body.dark #global-settings span {
+  color: var(--fg) !important;
+}
+
+body.dark #global-settings .info-tooltip svg {
+  stroke: var(--muted) !important;
+}
+
+/* Dark mode: Final export bar (Copy Final, Export, View JSON) */
+body.dark #final-export-bar {
+  background: rgba(255, 255, 255, 0.03) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+body.dark #final-export-bar .btn-secondary {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: var(--fg) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+body.dark #final-export-bar .btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.12) !important;
+}
+
+body.dark #final-export-bar #final-export-dropdown-btn {
+  background: #27ae60 !important;
+  color: #fff !important;
+}
+
+body.dark #final-export-hint {
+  color: var(--muted) !important;
+}
+
+/* Dark mode: Export dropdown menu */
+body.dark #final-export-dropdown-menu {
+  background: #2a2a32 !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+body.dark #final-export-dropdown-menu button {
+  color: var(--fg) !important;
+}
+
+body.dark #final-export-dropdown-menu button:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Dark mode: JSON output block */
+body.dark .json-code,
+body.dark #final-json-output {
+  background: #1a1a22 !important;
+  color: #a0e8c0 !important;
+  border-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+/* Dark mode: Format toggle bar */
+body.dark .format-toggle-bar {
+  background: rgba(255, 255, 255, 0.03) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+/* Dark mode: Table Detection section */
+body.dark #table-scan-results-container {
+  color: var(--fg);
+}
+
+body.dark #table-scan-results-container h3,
+body.dark #table-scan-results-container h4,
+body.dark #table-scan-results-container p,
+body.dark #table-scan-results-container span {
+  color: var(--fg) !important;
+}
+
+body.dark #table-scan-results-container .btn-secondary {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: var(--fg) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Dark mode: Checkbox tab buttons (Copy JSON, Download) */
+body.dark #checkbox-results-container .btn-secondary {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: var(--fg) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+body.dark #checkbox-results-container .btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.12) !important;
+}
+
 /* Dark mode: Scrollbar */
 body.dark ::-webkit-scrollbar {
   width: 6px;
@@ -949,6 +1045,11 @@ button:disabled {
   color: var(--accent-2);
 }
 
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 @keyframes fadeUp {
   from {
     opacity: 0;
@@ -1414,6 +1515,15 @@ button.hoverable:active {
   flex: 1 1 260px;
   max-width: 320px;
   min-width: 200px;
+  overflow: hidden;
+}
+
+/* Table cards span full width for proper horizontal scrolling */
+.result-card.table-card {
+  flex: 1 1 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .result-card:hover {
@@ -1497,10 +1607,11 @@ button.hoverable:active {
 }
 
 .result-card.flagged {
-  border-left: 3px solid #f59e0b;
+  border-left: 4px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.04);
   box-shadow:
-    inset 0 0 0 1px rgba(245, 158, 11, 0.15),
-    0 0 12px rgba(245, 158, 11, 0.06);
+    inset 0 0 0 1px rgba(245, 158, 11, 0.18),
+    0 0 12px rgba(245, 158, 11, 0.08);
 }
 
 .btn-icon {
@@ -2578,7 +2689,8 @@ body.chat-open .rd-header {
 .table-value-wrap {
   overflow-x: auto;
   overflow-y: auto;
-  max-height: 220px;
+  max-height: 300px;
+  min-width: 0;
   margin: 4px 0;
   border-radius: 8px;
   border: 1px solid rgba(0, 0, 0, 0.06);

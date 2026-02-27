@@ -342,6 +342,9 @@ async def extract_fields(
                 async with _gpu_semaphore:
                     print(f"🔒 GPU semaphore acquired for extraction")
                     extractor = Qwen2VLExtractor()
+                    detected_checkboxes = []  # Stores auto-detected checkboxes (separate from field results)
+                    cb_resolved_fields = set()  # Fields resolved by checkbox pre-scan
+                    cb_enabled = checkbox_enabled.lower() == "true"
                     
                     # ─── Multi-page fast-path: single VLM call across all pages ───
                     use_multipage = multipage.lower() == "true" and num_pages > 1
@@ -451,8 +454,83 @@ async def extract_fields(
                                     all_signals[field_name] = {"source": "table", "flags": ["not_found"], "page": 1}
                                     print(f"   📊 '{field_name}' — no table found")
                         
-                        # ─── Normal field extraction ───
-                        field_labels_for_extract = normal_fields
+                        # ─── Checkbox pre-scan (before field extraction) ───
+                        # Run checkbox detection FIRST to avoid expensive per-field fallback
+                        # on checkbox fields (which always return empty from batch extraction)
+                        cb_resolved_fields = set()  # Fields resolved by checkbox detection
+                        cb_enabled = checkbox_enabled.lower() == "true"
+                        if cb_enabled and model == "qwen" and _qwen2vl_available:
+                            _set_progress(4, 10, "Scanning for checkboxes...")
+                            print(f"\n   ☑️ Pre-scanning for checkboxes...")
+                            all_checkboxes = []
+                            for page_idx, raw_img in enumerate(raw_images):
+                                page_cbs = extractor.extract_checkboxes(raw_img, fields=None)
+                                for cb in page_cbs:
+                                    cb["_page"] = page_idx + 1
+                                all_checkboxes.extend(page_cbs)
+                            
+                            if all_checkboxes:
+                                print(f"   ☑️ Found {len(all_checkboxes)} checkboxes in document")
+                                
+                                def _norm(s):
+                                    return ''.join(s.strip().lower().split())
+                                
+                                cb_lookup = {}
+                                cb_norm_lookup = {}
+                                for cb in all_checkboxes:
+                                    cb_lookup[cb["label"].strip().lower()] = cb
+                                    cb_norm_lookup[_norm(cb["label"])] = cb
+                                
+                                # Match user's fields to detected checkboxes
+                                for field_name in normal_fields[:]:  # iterate copy
+                                    fn_lower = field_name.strip().lower()
+                                    fn_norm = _norm(field_name)
+                                    matched = cb_lookup.get(fn_lower) or cb_norm_lookup.get(fn_norm)
+                                    
+                                    if not matched:
+                                        for cb_label, cb_data in cb_lookup.items():
+                                            if fn_lower in cb_label or cb_label in fn_lower:
+                                                matched = cb_data
+                                                break
+                                    
+                                    if matched:
+                                        status_str = "Checked" if matched["checked"] else "Unchecked"
+                                        all_results[field_name] = status_str
+                                        all_signals[field_name] = {
+                                            **matched.get("signal", {"source": "checkbox_batch", "flags": []}),
+                                            "page": matched.get("_page", 1),
+                                        }
+                                        detected_checkboxes.append({
+                                            "label": matched.get("label", field_name),
+                                            "checked": matched.get("checked", False),
+                                            "signal": matched.get("signal", {"source": "checkbox_batch", "flags": []}),
+                                        })
+                                        cb_resolved_fields.add(field_name)
+                                
+                                # Try VQA fallback for unmatched fields that MIGHT be checkboxes
+                                # (only for fields not yet resolved)
+                                unmatched_normal = [f for f in normal_fields if f not in cb_resolved_fields]
+                                
+                                # Include non-user-field checkboxes for Checkboxes tab
+                                user_norm = {_norm(f) for f in normal_fields}
+                                for cb in all_checkboxes:
+                                    if _norm(cb["label"]) not in user_norm:
+                                        detected_checkboxes.append({
+                                            "label": cb["label"],
+                                            "checked": cb.get("checked", False),
+                                            "signal": {"source": "checkbox_batch", "flags": []},
+                                        })
+                                
+                                if cb_resolved_fields:
+                                    print(f"   ☑️ Resolved {len(cb_resolved_fields)}/{len(normal_fields)} fields as checkboxes (skipping per-field fallback)")
+                                    print(f"   ☑️ Remaining {len(unmatched_normal)} fields for normal extraction")
+                            else:
+                                unmatched_normal = normal_fields
+                        else:
+                            unmatched_normal = normal_fields
+                        
+                        # ─── Normal field extraction (only non-checkbox fields) ───
+                        field_labels_for_extract = [f for f in normal_fields if f not in cb_resolved_fields]
                         
                         for page_idx in range(num_pages):
                             page_num = page_idx + 1
@@ -470,7 +548,7 @@ async def extract_fields(
                             if not extract_fields_for_page:
                                 continue
                             
-                            _set_progress(3 + page_idx, 10, f"Extracting fields — page {page_num}/{num_pages}...")
+                            _set_progress(5 + page_idx, 10, f"Extracting fields — page {page_num}/{num_pages}...")
                             print(f"\n   📄 Page {page_num}/{num_pages}: extracting {len(extract_fields_for_page)} fields...")
                             page_results = extractor.extract(
                                 page_img, [], [], extract_fields_for_page,
@@ -495,78 +573,63 @@ async def extract_fields(
                                         "page": page_num,
                                     }
                     
-                    _set_progress(7, 10, "Detecting checkboxes...")
-                    # ─── Auto-detect checkbox fields (run on raw images) ───
+                    # ─── Post-extraction: VQA fallback for unmatched checkbox fields ───
+                    _set_progress(8, 10, "Final checks...")
                     model_signals = all_signals
                     results = all_results
-                    cb_enabled = checkbox_enabled.lower() == "true"
+                    
+                    # For fields that are still echo values (value = field name) after extraction,
+                    # try individual checkbox VQA as last resort
                     if cb_enabled and model == "qwen" and _qwen2vl_available:
                         def _norm(s):
                             return ''.join(s.strip().lower().split())
                         
-                        echo_fields = []
+                        echo_fields_remaining = []
                         for field_name, value in results.items():
+                            if field_name in cb_resolved_fields:
+                                continue  # Already resolved
                             if isinstance(value, str):
                                 if (field_name.strip().lower() == value.strip().lower() or
                                     _norm(field_name) == _norm(value)):
-                                    echo_fields.append(field_name)
+                                    echo_fields_remaining.append(field_name)
                         
-                        if echo_fields:
-                            print(f"   ☑️ Detected {len(echo_fields)} checkbox-style fields")
-                            # Run checkbox detection on all raw pages
-                            all_checkboxes = []
-                            for page_idx, raw_img in enumerate(raw_images):
-                                page_cbs = extractor.extract_checkboxes(raw_img, fields=None)
-                                for cb in page_cbs:
-                                    cb["_page"] = page_idx + 1
-                                all_checkboxes.extend(page_cbs)
-                            
-                            cb_lookup = {}
-                            cb_norm_lookup = {}
-                            for cb in all_checkboxes:
-                                cb_lookup[cb["label"].strip().lower()] = cb
-                                cb_norm_lookup[_norm(cb["label"])] = cb
-                            
-                            for field_name in echo_fields:
-                                fn_lower = field_name.strip().lower()
-                                fn_norm = _norm(field_name)
-                                matched = cb_lookup.get(fn_lower) or cb_norm_lookup.get(fn_norm)
-                                
-                                if not matched:
-                                    for cb_label, cb_data in cb_lookup.items():
-                                        if fn_lower in cb_label or cb_label in fn_lower:
-                                            matched = cb_data
-                                            break
-                                
-                                if not matched:
-                                    try:
-                                        # Try VQA fallback on the page where the field was found
-                                        field_page = model_signals.get(field_name, {}).get("page", 1)
-                                        fallback_img = raw_images[field_page - 1] if field_page <= len(raw_images) else raw_images[0]
-                                        is_checked = extractor._extract_single_checkbox(fallback_img, field_name)
-                                        matched = {"label": field_name, "checked": is_checked, "_page": field_page,
-                                                   "signal": {"source": "checkbox_vqa", "flags": ["vqa_fallback"]}}
-                                    except Exception:
-                                        pass
-                                
-                                if matched:
-                                    status_str = "Checked" if matched["checked"] else "Unchecked"
+                        if echo_fields_remaining:
+                            print(f"\n   ☑️ {len(echo_fields_remaining)} remaining echo fields — trying VQA fallback")
+                            for field_name in echo_fields_remaining:
+                                try:
+                                    field_page = model_signals.get(field_name, {}).get("page", 1)
+                                    fallback_img = raw_images[field_page - 1] if field_page <= len(raw_images) else raw_images[0]
+                                    is_checked = extractor._extract_single_checkbox(fallback_img, field_name)
+                                    status_str = "Checked" if is_checked else "Unchecked"
                                     results[field_name] = status_str
                                     model_signals[field_name] = {
-                                        **matched.get("signal", {"source": "checkbox_batch", "flags": []}),
-                                        "page": matched.get("_page", 1),
+                                        "source": "checkbox_vqa", "flags": ["vqa_fallback"],
+                                        "page": field_page,
                                     }
-                                else:
-                                    results[field_name] = "Not Found"
-                                    model_signals[field_name] = {"source": "checkbox_batch", "flags": ["not_found"], "page": 1}
+                                    detected_checkboxes.append({
+                                        "label": field_name,
+                                        "checked": is_checked,
+                                        "signal": {"source": "checkbox_vqa", "flags": ["vqa_fallback"]},
+                                    })
+                                    print(f"      {'☑' if is_checked else '☐'} '{field_name}' = {status_str} [vqa_fallback]")
+                                except Exception:
+                                    pass
                     
-                    # ─── Table extraction fallback (for empty/echo fields) ───
+                    if detected_checkboxes:
+                        print(f"   📊 Total: {len(detected_checkboxes)} checkboxes detected")
+                    
+                    # ─── Table extraction fallback (for empty/echo fields, skip checkbox-resolved) ───
                     table_candidates = []
                     for field_name, value in results.items():
+                        if field_name in cb_resolved_fields:
+                            continue  # Already resolved as checkbox
                         val = value.strip() if isinstance(value, str) else ""
                         is_empty = not val
                         is_echo = val.lower() == field_name.strip().lower()
                         is_not_found = val.lower() in ("not found", "none", "")
+                        # Skip Checked/Unchecked values from checkbox detection
+                        if val.lower() in ("checked", "unchecked"):
+                            continue
                         # Heuristic: value looks like concatenated column data (3+ items separated by commas or newlines)
                         parts = [p.strip() for p in val.replace("\n", ",").split(",") if p.strip()]
                         is_multi_value = len(parts) >= 3
@@ -699,10 +762,14 @@ async def extract_fields(
                 "batch": 0.95,
                 "multipage": 0.90,
                 "table": 0.90,
+                "checkbox_batch": 0.92,   # Checkbox pre-scan (high accuracy)
                 "checkbox_vlm": 0.85,
                 "checkbox_zoom": 0.80,
+                "checkbox_vqa": 0.75,     # VQA fallback for checkboxes
+                "fallback": 0.65,         # Per-field fallback recovery
                 "single_field": 0.75,
                 "fallback_recovery": 0.60,
+                "voting": 0.90,           # Majority voting
                 "zoom": 0.50,
                 "unknown": 0.50,
             }
@@ -732,6 +799,7 @@ async def extract_fields(
                 "auto_flagged_count": len(flagged_fields),
                 "validation_errors": validation_errors,
                 "normalized_values": normalized_values,
+                "detected_checkboxes": detected_checkboxes if detected_checkboxes else [],
             }
         }
         
