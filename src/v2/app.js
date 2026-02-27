@@ -1608,6 +1608,33 @@ function renderApp() {
     for (const [k, v] of Object.entries(currentExtractionData)) {
       if (k !== "_meta") exportData[k] = v;
     }
+
+    // Helper: build export data based on current format state
+    function getExportData() {
+      const data = {};
+      for (const [k, v] of Object.entries(currentExtractionData)) {
+        if (k === "_meta") continue;
+        if (showFormatted) {
+          const decomposed = decomposeField(k, v);
+          if (decomposed) {
+            // Expand decomposed parts inline: "Patient Address" → "Patient Address - Street", etc.
+            for (const part of decomposed) {
+              data[`${k} - ${part.label}`] = part.value;
+            }
+            continue;
+          }
+          // Use normalized value if available
+          const norm = (currentExtractionData._meta?.normalized_values || {})[k];
+          if (norm && norm !== v) {
+            data[k] = norm;
+            continue;
+          }
+        }
+        data[k] = v;
+      }
+      return data;
+    }
+
     html += `
       <div class="json-actions animate-fadeUp" style="animation-delay: ${idx * 0.03}s;">
         <button id="copy-json" class="btn-secondary">${icons.copy(14)} Copy JSON</button>
@@ -1679,17 +1706,10 @@ function renderApp() {
           }
         });
 
-        // Update JSON preview
+        // Update JSON preview with formatted data
         const jsonOut = document.getElementById("json-output");
         if (jsonOut) {
-          const jsonData = {};
-          container.querySelectorAll(".result-card").forEach((card) => {
-            const field = card.dataset.field;
-            const raw = card.dataset.raw;
-            const normalized = card.dataset.normalized;
-            jsonData[field] = showFormatted ? (normalized || raw) : raw;
-          });
-          jsonOut.textContent = JSON.stringify(jsonData, null, 2);
+          jsonOut.textContent = JSON.stringify(getExportData(), null, 2);
         }
       });
     }
@@ -1817,10 +1837,10 @@ function renderApp() {
       });
     });
 
-    // Copy JSON
+    // Copy JSON (uses formatted data when format mode is on)
     document.getElementById("copy-json")?.addEventListener("click", () => {
       navigator.clipboard.writeText(
-        JSON.stringify(currentExtractionData, null, 2),
+        JSON.stringify(getExportData(), null, 2),
       );
       const btn = document.getElementById("copy-json");
       btn.innerHTML = `${icons.check(14)} Copied!`;
@@ -1838,9 +1858,9 @@ function renderApp() {
       document.addEventListener("click", () => { exportDropdownMenu.style.display = "none"; });
     }
 
-    // Download JSON (inside dropdown)
+    // Download JSON (uses formatted data when format mode is on)
     document.getElementById("download-json")?.addEventListener("click", () => {
-      const blob = new Blob([JSON.stringify(currentExtractionData, null, 2)], {
+      const blob = new Blob([JSON.stringify(getExportData(), null, 2)], {
         type: "application/json",
       });
       const url = URL.createObjectURL(blob);
@@ -1852,12 +1872,12 @@ function renderApp() {
       URL.revokeObjectURL(url);
     });
 
-    // Export CSV
+    // Export CSV (uses formatted data when format mode is on)
     document.getElementById("export-csv")?.addEventListener("click", async () => {
       const btn = document.getElementById("export-csv");
       try {
         btn.textContent = "Exporting...";
-        await exportCSV(currentExtractionData, selectedFile?.name || "extraction");
+        await exportCSV(getExportData(), selectedFile?.name || "extraction");
         btn.innerHTML = `${icons.check(14)} Exported!`;
         setTimeout(() => { btn.innerHTML = `${icons.download(14)} Export CSV`; }, 2000);
       } catch (err) {

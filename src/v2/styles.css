@@ -37,7 +37,9 @@ body {
     radial-gradient(circle at 20% 80%, #f0e6d8 0%, var(--bg-accent) 40%);
   color: var(--fg);
   min-height: 100vh;
-  transition: background 0.3s, color 0.3s;
+  transition:
+    background 0.3s,
+    color 0.3s;
 }
 
 body.dark {
@@ -369,7 +371,7 @@ body.dark small {
 /* ─── Theme Toggle ─── */
 .theme-toggle {
   background: none;
-  border: 1px solid rgba(0,0,0,0.08);
+  border: 1px solid rgba(0, 0, 0, 0.08);
   cursor: pointer;
   color: var(--muted);
   width: 32px;
@@ -541,6 +543,8 @@ body.dark .theme-toggle:hover {
   right: 0;
   min-width: 300px;
   max-width: 380px;
+  max-height: 420px;
+  overflow-y: auto;
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid rgba(0, 0, 0, 0.08);
   border-radius: 14px;
