@@ -666,7 +666,8 @@ function renderApp() {
     findTablesBtn.disabled = false;
     statusEl.textContent = "Ready to process";
 
-    // Update chat with new file
+    // Update chat with new file — always clear history on new selection/paste
+    chatPanel.clearHistory();
     chatPanel.setFile(file);
 
     // Clear review queue when new PDF selected
@@ -678,6 +679,7 @@ function renderApp() {
     tableScanResultsContainer.innerHTML = "";
     lastCheckboxResults = null;
     lastTableResults = null;
+    currentExtractionData = {};
 
     // Clear fields from previous document
     CURRENT_FIELDS = [];
